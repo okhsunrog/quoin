@@ -14,6 +14,7 @@ categories = ["compression"]
 # Avoids the per-call overhead of `is_x86_feature_detected!` and generates
 # baseline / AVX2 / AVX-512 clones from a single attribute.
 multiversion = "0.8.0"
+zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
 
@@ -21,3 +22,14 @@ multiversion = "0.8.0"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[features]
+# Compare against zstd (vendored) in the bench harness.
+bench-zstd = ["dep:zstd"]
+# Compare against the upstream C `fc` library, compiled and linked via FFI.
+# Point FC_SRC_DIR at the `fc` checkout (defaults to ../fc).
+bench-fc = []
+
+[build-dependencies]
+# Only used when the `bench-fc` feature is active; cheap enough to always pull.
+cc = "1.2.64"
