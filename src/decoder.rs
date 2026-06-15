@@ -6,7 +6,7 @@
 use crate::codecs::{const_block, linear, lz, pred, raw, stride, xorz};
 use crate::entropy::decode_residuals;
 use crate::error::Error;
-use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN};
+use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN, MAX_BLOCK_VALUES};
 use crate::mode::Mode;
 
 /// Upper bound on a predictor residual stream: at most 10 LEB128 bytes/value.
@@ -39,6 +39,12 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
         let n = u32::from_le_bytes(src[pos + 1..pos + 5].try_into().unwrap()) as usize;
         let plen = u32::from_le_bytes(src[pos + 5..pos + 9].try_into().unwrap()) as usize;
         pos += FRAME_HEADER_LEN;
+
+        // Reject blocks larger than the encoder ever emits — bounds per-block
+        // allocation and prevents a tiny frame from claiming a huge value count.
+        if n > MAX_BLOCK_VALUES {
+            return Err(Error::CorruptPayload("block value count exceeds maximum"));
+        }
 
         let end = pos.checked_add(plen).ok_or(Error::Truncated)?;
         if end > src.len() {

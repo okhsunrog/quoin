@@ -1,0 +1,30 @@
+[package]
+name = "fp-compressor-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fp-compressor]
+path = ".."
+
+# `decompress` must never crash on untrusted input — only Ok/Err.
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false
+
+# compress -> decompress must be a lossless round trip for any input.
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

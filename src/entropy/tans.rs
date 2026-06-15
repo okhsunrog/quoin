@@ -200,6 +200,26 @@ pub(crate) fn decompress_bytes(src: &[u8], max_len: usize) -> Result<Vec<u8>, Er
         return Err(Error::CorruptPayload("tans state out of range"));
     }
 
+    // Validate the model from the (untrusted) header: weights must be >= 1,
+    // symbols distinct, and weights sum to exactly TABLE_SIZE. The encoder
+    // guarantees this; a corrupt stream might not, and the table-build /
+    // decode loops rely on it to stay in range (else integer underflow / OOB).
+    let mut seen = [false; 256];
+    let mut wsum: u32 = 0;
+    for (i, &sym) in which.iter().enumerate() {
+        if weights[i] == 0 {
+            return Err(Error::CorruptPayload("tans zero weight"));
+        }
+        if seen[sym as usize] {
+            return Err(Error::CorruptPayload("tans duplicate symbol"));
+        }
+        seen[sym as usize] = true;
+        wsum += u32::from(weights[i]);
+    }
+    if wsum != TABLE_SIZE {
+        return Err(Error::CorruptPayload("tans weights do not sum to table size"));
+    }
+
     let state_symbols = spread(&weights, &which);
 
     // Decoder nodes.
@@ -226,7 +246,13 @@ pub(crate) fn decompress_bytes(src: &[u8], max_len: usize) -> Result<Vec<u8>, Er
     let mut br = BitReader::new(&src[pos..]);
     let mut out = Vec::with_capacity(expected);
     for _ in 0..expected {
+        // `state` is built as TABLE_SIZE + node_base + extra; a valid model
+        // keeps it in [TABLE_SIZE, 2*TABLE_SIZE), but guard against a corrupt
+        // model pushing the index out of the node tables.
         let idx = (state - TABLE_SIZE) as usize;
+        if idx >= TABLE_SIZE as usize {
+            return Err(Error::CorruptPayload("tans state index out of range"));
+        }
         let bits = u32::from(node_bits[idx]);
         let extra = br.get(bits) as u32;
         out.push(node_sym[idx]);

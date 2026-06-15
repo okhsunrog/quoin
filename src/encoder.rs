@@ -13,7 +13,8 @@ use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
 
 /// Values per block. 32768 * 8 B = 256 KiB, matching `fc`'s default quantum.
-const QUANTUM_VALUES: usize = 32 * 1024;
+/// Must not exceed the decoder's `MAX_BLOCK_VALUES`, which is defined as this.
+const QUANTUM_VALUES: usize = crate::format::MAX_BLOCK_VALUES;
 
 pub(crate) fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
     let predictor_log2 = cfg.clamped_predictor_log2();
