@@ -117,4 +117,9 @@ pub mod bench_internals {
     pub fn dfcm_encode(vals: &[u64], predictor_log2: u8) -> Vec<u8> {
         crate::codecs::pred::dfcm_encode(vals, predictor_log2)
     }
+
+    /// Multiversion-dispatched byte-transpose (for tracking SIMD speed).
+    pub fn byte_transpose(src: &[u8], n: usize, dst: &mut [u8]) {
+        crate::transform::byte_transpose(src, n, dst);
+    }
 }

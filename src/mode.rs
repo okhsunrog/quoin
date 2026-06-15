@@ -19,6 +19,8 @@ pub enum Mode {
     Raw = 5,
     /// LZ77 over the block bytes, token stream entropy-coded.
     Lz = 4,
+    /// Byte-plane transpose (AoS→SoA), then entropy-coded.
+    ByteTranspose = 11,
     /// Second-order integer delta of bit patterns (zigzag), residuals entropy-coded.
     OrderedDelta = 7,
     /// Second-order linear extrapolation in float space, residuals entropy-coded.
@@ -42,6 +44,7 @@ impl Mode {
             3 => Mode::Xorz,
             4 => Mode::Lz,
             5 => Mode::Raw,
+            11 => Mode::ByteTranspose,
             7 => Mode::OrderedDelta,
             20 => Mode::Delta2,
             25 => Mode::Pred2,

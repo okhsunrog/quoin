@@ -12,4 +12,5 @@ pub(crate) mod lz;
 pub(crate) mod pred;
 pub(crate) mod raw;
 pub(crate) mod stride;
+pub(crate) mod transpose;
 pub(crate) mod xorz;

@@ -7,7 +7,7 @@
 //! `parallel` feature they are encoded across a rayon pool.
 
 use crate::Config;
-use crate::codecs::{const_block, linear, lz, pred, raw, stride, xorz};
+use crate::codecs::{const_block, linear, lz, pred, raw, stride, transpose, xorz};
 use crate::entropy::code_residuals;
 use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
@@ -112,6 +112,11 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     if looks_compressible(best_payload.len(), raw_bytes) {
         let lz_res = lz::encode(block);
         consider(Mode::Lz, code_residuals(&lz_res), &mut best_mode, &mut best_payload);
+
+        // Byte-plane transpose: helps when a byte position is low-entropy across
+        // values (smooth floats share sign/exponent bytes).
+        let soa = transpose::encode(block);
+        consider(Mode::ByteTranspose, code_residuals(&soa), &mut best_mode, &mut best_payload);
     }
 
     frame_bytes(best_mode, block.len(), &best_payload)

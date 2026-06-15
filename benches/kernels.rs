@@ -57,6 +57,18 @@ fn bench_entropy(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_transpose(c: &mut Criterion) {
+    let aos: Vec<u8> = smooth_bits().iter().flat_map(|v| v.to_le_bytes()).collect();
+    let n = aos.len() / 8;
+    let mut dst = vec![0u8; aos.len()];
+    let mut g = c.benchmark_group("transpose");
+    g.throughput(Throughput::Bytes(aos.len() as u64));
+    g.bench_function("byte_transpose", |b| {
+        b.iter(|| bi::byte_transpose(black_box(&aos), n, black_box(&mut dst)))
+    });
+    g.finish();
+}
+
 fn bench_predictors(c: &mut Criterion) {
     let vals = smooth_bits();
     let mut g = c.benchmark_group("predictors");
@@ -85,5 +97,12 @@ fn bench_pipeline(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_hash, bench_entropy, bench_predictors, bench_pipeline);
+criterion_group!(
+    benches,
+    bench_hash,
+    bench_entropy,
+    bench_transpose,
+    bench_predictors,
+    bench_pipeline
+);
 criterion_main!(benches);
