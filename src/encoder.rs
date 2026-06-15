@@ -7,7 +7,7 @@
 //! this pass is single-threaded.
 
 use crate::Config;
-use crate::codecs::{const_block, pred, raw, stride, xorz};
+use crate::codecs::{const_block, linear, pred, raw, stride, xorz};
 use crate::entropy::code_residuals;
 use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
@@ -63,6 +63,13 @@ fn encode_block(block: &[u64], predictor_log2: u8, out: &mut Vec<u8>) {
     let dfcm_res = pred::dfcm_encode(block, predictor_log2);
     if looks_compressible(dfcm_res.len(), raw_bytes) {
         consider(Mode::Pred2, code_residuals(&dfcm_res), &mut best_mode, &mut best_payload);
+    }
+
+    // Second-order float-linear predictor: wins on smooth oscillating signals
+    // (sine, audio, climate) where integer-delta predictors fail at zero crossings.
+    let lin2_res = linear::encode(block);
+    if looks_compressible(lin2_res.len(), raw_bytes) {
+        consider(Mode::Delta2, code_residuals(&lin2_res), &mut best_mode, &mut best_payload);
     }
 
     write_frame(best_mode, block.len(), &best_payload, out);

@@ -1,6 +1,6 @@
 //! Stream decoder: walk the block frames and dispatch each to its codec.
 
-use crate::codecs::{const_block, pred, raw, stride, xorz};
+use crate::codecs::{const_block, linear, pred, raw, stride, xorz};
 use crate::entropy::decode_residuals;
 use crate::error::Error;
 use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN};
@@ -55,6 +55,10 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
             Mode::Pred2 => {
                 let resid = decode_residuals(payload, resid_bound(n))?;
                 pred::dfcm_decode(&resid, n, predictor_log2)?
+            }
+            Mode::Delta2 => {
+                let resid = decode_residuals(payload, resid_bound(n))?;
+                linear::decode(&resid, n)?
             }
         };
         bits.extend_from_slice(&decoded);
