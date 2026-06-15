@@ -55,14 +55,23 @@ These unlock most of the remaining modes:
 
 - [ ] Adaptive block sizing (256 KiB–1 MiB quantum probe, like `fc`). Would help
       `constant` (fewer headers) toward `fc`'s 39756×.
+- [x] LZ / RLE / dictionary mode — done (`LZ`, hash-chain LZ77 + entropy).
+      dict-16 3519×, quantized 1108×, stocks 6.9×; `decimal-cents` (122×) still
+      trails zstd — wants a bigger window / better 1024-value dictionary.
+- [x] Multi-threaded encode + decode — done (rayon).
+- [x] Benchmark harness vs. zstd / the C `fc` — done (`examples/compare.rs`)
+      plus criterion kernel benches (`benches/kernels.rs`).
+- [ ] **Decoder robustness / fuzzing** — it parses untrusted bytes; add a
+      randomized malformed-input test (stable) + a `cargo-fuzz` target.
 - [ ] Lossless double-precision delta (`DELTA_DP`) — `fc` nails `parabolic`
       (2972×) via exact float second differences; needs careful invertibility.
-- [ ] LZ / RLE / dictionary mode — `fc` and zstd beat us on the repeating-value
-      sets (`decimal-cents`, `dict-16`, `quantized`, `stocks`).
-- [x] Multi-threaded encode + decode — done (rayon).
+- [ ] Byte-transpose / bitplane mode using `multiversion` — the genuinely
+      lane-wise kernel where AVX2 actually pays (verify scalar-vs-AVX2 with
+      criterion). Also resolves the dead `transform.rs` multiversion demo.
+- [ ] Adaptive block sizing (256 KiB–1 MiB quantum probe, like `fc`). Would help
+      `constant` (fewer headers) toward `fc`'s 39756×.
 - [ ] Feature-gated mode selection (block stats decide which modes to try),
       mirroring `fc`'s `exp_range` / `sign_flips` / `distinct_count` gates.
 - [ ] ARM/NEON path for the hot kernels.
 - [ ] Diagnostics counters (`fc_enc_mode_wins` equivalent).
 - [ ] Optional `fc`-wire-compatible profile for cross-testing against the C lib.
-- [ ] Benchmark harness vs. zstd / lz4 / the C `fc`.
