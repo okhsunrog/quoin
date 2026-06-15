@@ -7,7 +7,8 @@
 //! this pass is single-threaded.
 
 use crate::Config;
-use crate::codecs::{const_block, pred, pred_rc, raw, stride, xorz};
+use crate::codecs::{const_block, pred, raw, stride, xorz};
+use crate::entropy::rc;
 use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
 
@@ -47,18 +48,32 @@ fn encode_block(block: &[u64], predictor_log2: u8, out: &mut Vec<u8>) {
     }
     consider(Mode::Xorz, xorz::encode(block), &mut best_mode, &mut best_payload);
 
-    // Run the predictor once; PRED stores the residuals verbatim while PRED_RC
-    // range-codes the same stream.
-    let residuals = pred::encode(block, predictor_log2);
-    consider(
-        Mode::PredRc,
-        pred_rc::encode_from_residuals(&residuals),
-        &mut best_mode,
-        &mut best_payload,
-    );
-    consider(Mode::Pred, residuals, &mut best_mode, &mut best_payload);
+    let raw_bytes = block.len() * 8;
+
+    // FCM predictor: store residuals verbatim (PRED, cheap) and, when the
+    // residual stream looks compressible, also range-code them (PRED_RC).
+    let fcm_res = pred::encode(block, predictor_log2);
+    if looks_compressible(fcm_res.len(), raw_bytes) {
+        consider(Mode::PredRc, rc::compress_bytes(&fcm_res), &mut best_mode, &mut best_payload);
+    }
+    consider(Mode::Pred, fcm_res, &mut best_mode, &mut best_payload);
+
+    // DFCM predictor (range-coded only): wins on smooth/ramp data where FCM's
+    // exact-repeat prediction fails but the deltas are predictable.
+    let dfcm_res = pred::dfcm_encode(block, predictor_log2);
+    if looks_compressible(dfcm_res.len(), raw_bytes) {
+        consider(Mode::Pred2, rc::compress_bytes(&dfcm_res), &mut best_mode, &mut best_payload);
+    }
 
     write_frame(best_mode, block.len(), &best_payload, out);
+}
+
+/// Cheap gate for the expensive range-coded modes: only bother when the
+/// predictor already shrank the stream below ~95% of raw. Skips the slow
+/// arithmetic coder on essentially-incompressible blocks (e.g. random data),
+/// where it can't help anyway.
+fn looks_compressible(residual_bytes: usize, raw_bytes: usize) -> bool {
+    residual_bytes.saturating_mul(20) < raw_bytes.saturating_mul(19)
 }
 
 fn write_frame(mode: Mode, n_values: usize, payload: &[u8], out: &mut Vec<u8>) {

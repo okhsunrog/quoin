@@ -1,9 +1,16 @@
 //! Stream decoder: walk the block frames and dispatch each to its codec.
 
-use crate::codecs::{const_block, pred, pred_rc, raw, stride, xorz};
+use crate::codecs::{const_block, pred, raw, stride, xorz};
+use crate::entropy::rc;
 use crate::error::Error;
 use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN};
 use crate::mode::Mode;
+
+/// Upper bound on a predictor residual stream: at most 10 LEB128 bytes/value.
+/// Guards range-coder decode against a corrupt length field.
+fn resid_bound(n: usize) -> usize {
+    n.saturating_mul(10) + 16
+}
 
 pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
     let header = Header::read(src)?;
@@ -41,7 +48,14 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
             Mode::Stride => stride::decode(payload, n)?,
             Mode::Xorz => xorz::decode(payload, n)?,
             Mode::Pred => pred::decode(payload, n, predictor_log2)?,
-            Mode::PredRc => pred_rc::decode(payload, n, predictor_log2)?,
+            Mode::PredRc => {
+                let resid = rc::decompress_bytes(payload, resid_bound(n))?;
+                pred::decode(&resid, n, predictor_log2)?
+            }
+            Mode::Pred2 => {
+                let resid = rc::decompress_bytes(payload, resid_bound(n))?;
+                pred::dfcm_decode(&resid, n, predictor_log2)?
+            }
         };
         bits.extend_from_slice(&decoded);
     }

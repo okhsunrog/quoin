@@ -8,7 +8,6 @@
 
 pub(crate) mod const_block;
 pub(crate) mod pred;
-pub(crate) mod pred_rc;
 pub(crate) mod raw;
 pub(crate) mod stride;
 pub(crate) mod xorz;
