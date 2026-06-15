@@ -61,8 +61,10 @@ These unlock most of the remaining modes:
 - [x] Multi-threaded encode + decode — done (rayon).
 - [x] Benchmark harness vs. zstd / the C `fc` — done (`examples/compare.rs`)
       plus criterion kernel benches (`benches/kernels.rs`).
-- [ ] **Decoder robustness / fuzzing** — it parses untrusted bytes; add a
-      randomized malformed-input test (stable) + a `cargo-fuzz` target.
+- [x] **Decoder robustness / fuzzing** — done. `tests/robustness.rs` (stable
+      randomized) + `fuzz/` (cargo-fuzz: `decompress`, `roundtrip`). Fixed three
+      crash/DoS vectors (tANS model validation, `predictor_log2` range, a
+      decompression bomb via oversized block counts).
 - [ ] Lossless double-precision delta (`DELTA_DP`) — `fc` nails `parabolic`
       (2972×) via exact float second differences; needs careful invertibility.
 - [ ] Byte-transpose / bitplane mode using `multiversion` — the genuinely
