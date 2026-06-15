@@ -3,23 +3,25 @@
 Porting the `fc` floating-point compressor to Rust, module by module. The
 original is one ~6,200-line C file with ~50 codecs; this tracks the port.
 
-## Done (v0.1)
+## Done
 
 - [x] Project skeleton, safe public API (`compress` / `decompress` / `Config`).
 - [x] Stream format v1 (16-byte header + per-block frames) with bounds-checked
       decode.
-- [x] Mode competition driver (single-threaded, fixed quantum).
+- [x] Mode competition driver with cheap per-block gating.
 - [x] SIMD plumbing: CRC32C FCM hash kernel (hw `_mm_crc32_u64` + bit-exact
       software fallback, runtime-dispatched); `multiversion` lane-wise transform.
-- [x] Codecs: `RAW`, `CONST`, `STRIDE`, `XORZ`, `PRED` (FCM + XOR + LEB128).
 - [x] Round-trip tests across synthetic datasets (incl. NaN / ±0 / inf).
 - [x] Benchmark harness vs zstd (vendored) and the C `fc` (FFI), 17 datasets.
-- [x] **Binary range coder** (LZMA-style) + adaptive order-1 byte model.
-- [x] **MSB-first bit I/O** (`bitio`) + **tANS** (table ANS, ported from `fc`).
-- [x] **DFCM predictor** (`PRED2`) — nails smooth/linear data FCM misses.
-- [x] Predictor residuals entropy-coded, picking smaller of RC vs tANS per
-      block (1-byte tag). Block gating skips heavy coders on random data.
-      Aggregate ratio 1.73 → **2.37×** (vs C fc 3.07×, zstd-9 2.09×).
+- [x] Entropy coders: **binary range coder** (LZMA-style, order-1) and **tANS**
+      (ported from `fc`) on **MSB-first bit I/O**; residuals pick the smaller.
+- [x] Predictors / codecs: `RAW`, `CONST`, `STRIDE`, `XORZ`, `PRED` (FCM),
+      `PRED2` (DFCM), `DELTA2` (float-linear), `ORDERED_DELTA` (integer 2nd
+      delta + zigzag).
+- [x] **Block-parallel** encode/decode via rayon (default-on `parallel`
+      feature; `Config.threads: Option<usize>`).
+- [x] Aggregate ratio 1.59 → **2.78×** (vs C fc 3.07×, zstd-9 2.09×). Outright
+      ratio wins vs both on linear (96×), piecewise (83×), int-x1000 (7127×).
 
 ## Building blocks to port next
 
@@ -51,8 +53,13 @@ These unlock most of the remaining modes:
 
 ## Framework work
 
-- [ ] Adaptive block sizing (256 KiB–1 MiB quantum probe, like `fc`).
-- [ ] Multi-threaded encode + decode (`rayon` or a `std::thread` work queue).
+- [ ] Adaptive block sizing (256 KiB–1 MiB quantum probe, like `fc`). Would help
+      `constant` (fewer headers) toward `fc`'s 39756×.
+- [ ] Lossless double-precision delta (`DELTA_DP`) — `fc` nails `parabolic`
+      (2972×) via exact float second differences; needs careful invertibility.
+- [ ] LZ / RLE / dictionary mode — `fc` and zstd beat us on the repeating-value
+      sets (`decimal-cents`, `dict-16`, `quantized`, `stocks`).
+- [x] Multi-threaded encode + decode — done (rayon).
 - [ ] Feature-gated mode selection (block stats decide which modes to try),
       mirroring `fc`'s `exp_range` / `sign_flips` / `distinct_count` gates.
 - [ ] ARM/NEON path for the hot kernels.

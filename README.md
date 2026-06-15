@@ -7,10 +7,16 @@ compressor (Apache-2.0, © Praveen Vaddadi), which runs a competition between
 
 ## Status
 
-Early. The framework, stream format, and the mode competition are in place,
-with five real, round-tripping codecs (`RAW`, `CONST`, `STRIDE`, `XORZ`,
-`PRED`). The remaining ~45 modes from `fc` are tracked in
-[`ROADMAP.md`](ROADMAP.md).
+Working and competitive. The framework, stream format, mode competition,
+entropy coders (binary range coder + tANS), several predictors, and
+block-parallel encode/decode are in place. On the bundled 17-dataset harness
+the aggregate ratio is **2.78×** (vs the C `fc` 3.07× and zstd-9 2.09×), with
+**outright ratio wins over both** on linear (96×), piecewise (83×), and
+int-x1000 (7127×). Remaining `fc` modes and the known gaps (parabolic, the
+LZ-friendly repeating-value sets) are tracked in [`ROADMAP.md`](ROADMAP.md).
+
+Run `cargo run --release --bin bench --features bench-zstd,bench-fc` (with
+`FC_SRC_DIR` pointing at an `fc` checkout) to reproduce the comparison.
 
 ```rust
 use fp_compressor::{compress, decompress, Config};

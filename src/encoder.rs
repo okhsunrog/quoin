@@ -98,6 +98,13 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
         consider(Mode::Delta2, code_residuals(&lin2_res), &mut best_mode, &mut best_payload);
     }
 
+    // Second-order integer delta: wins on monotone/polynomial data (ramps,
+    // parabola) where the bit-pattern second difference is near-constant.
+    let idelta2_res = linear::idelta2_encode(block);
+    if looks_compressible(idelta2_res.len(), raw_bytes) {
+        consider(Mode::OrderedDelta, code_residuals(&idelta2_res), &mut best_mode, &mut best_payload);
+    }
+
     frame_bytes(best_mode, block.len(), &best_payload)
 }
 

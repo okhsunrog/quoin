@@ -15,6 +15,57 @@ use crate::error::Error;
 use crate::varint;
 
 #[inline]
+fn zigzag(n: u64) -> u64 {
+    (n << 1) ^ ((n as i64 >> 63) as u64)
+}
+
+#[inline]
+fn unzigzag(z: u64) -> u64 {
+    (z >> 1) ^ 0u64.wrapping_sub(z & 1)
+}
+
+/// IDELTA2: second-order delta of the raw `u64` bit patterns (subtractive,
+/// wrapping), zigzag + LEB128. For monotone-ish data (ramps, `0.5*i*i`) the
+/// integer second difference is constant within each exponent band and spikes
+/// only at band boundaries — far more compressible than the float-XOR variant.
+pub(crate) fn idelta2_encode(vals: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(vals.len());
+    let (mut p1, mut p2) = (0u64, 0u64);
+    for (i, &v) in vals.iter().enumerate() {
+        let pred = match i {
+            0 => 0,
+            1 => p1,
+            _ => p1.wrapping_mul(2).wrapping_sub(p2),
+        };
+        varint::write_u64(&mut out, zigzag(v.wrapping_sub(pred)));
+        p2 = p1;
+        p1 = v;
+    }
+    out
+}
+
+pub(crate) fn idelta2_decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+    let mut out = Vec::with_capacity(n);
+    let (mut p1, mut p2) = (0u64, 0u64);
+    let mut pos = 0usize;
+    for i in 0..n {
+        let pred = match i {
+            0 => 0,
+            1 => p1,
+            _ => p1.wrapping_mul(2).wrapping_sub(p2),
+        };
+        let v = pred.wrapping_add(unzigzag(varint::read_u64(payload, &mut pos)?));
+        out.push(v);
+        p2 = p1;
+        p1 = v;
+    }
+    if pos != payload.len() {
+        return Err(Error::CorruptPayload("idelta2 trailing bytes"));
+    }
+    Ok(out)
+}
+
+#[inline]
 fn predict(i: usize, prev1: f64, prev2: f64) -> u64 {
     let pred = match i {
         0 => 0.0,
@@ -52,4 +103,31 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
         return Err(Error::CorruptPayload("delta2 trailing bytes"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zigzag_roundtrips_including_negatives() {
+        for &v in &[0u64, 1, 2, u64::MAX, u64::MAX - 1, 1u64 << 63, 12345] {
+            assert_eq!(unzigzag(zigzag(v)), v);
+        }
+    }
+
+    #[test]
+    fn idelta2_roundtrips() {
+        // Includes a monotone ramp and a wrap-around to exercise signed deltas.
+        let vals: Vec<u64> = (0..1000u64).map(|i| i.wrapping_mul(3).wrapping_sub(7)).collect();
+        let enc = idelta2_encode(&vals);
+        assert_eq!(idelta2_decode(&enc, vals.len()).unwrap(), vals);
+    }
+
+    #[test]
+    fn float_delta2_roundtrips() {
+        let vals: Vec<u64> = (0..1000).map(|i| ((i as f64) * 0.5).to_bits()).collect();
+        let enc = encode(&vals);
+        assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
+    }
 }

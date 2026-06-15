@@ -17,6 +17,8 @@ pub enum Mode {
     Xorz = 3,
     /// Verbatim little-endian `u64` words. Always-available fallback.
     Raw = 5,
+    /// Second-order integer delta of bit patterns (zigzag), residuals entropy-coded.
+    OrderedDelta = 7,
     /// Second-order linear extrapolation in float space, residuals entropy-coded.
     Delta2 = 20,
     /// DFCM (differential FCM) predictor residuals, range-coded.
@@ -37,6 +39,7 @@ impl Mode {
             2 => Mode::Stride,
             3 => Mode::Xorz,
             5 => Mode::Raw,
+            7 => Mode::OrderedDelta,
             20 => Mode::Delta2,
             25 => Mode::Pred2,
             29 => Mode::PredRc,
