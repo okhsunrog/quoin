@@ -179,7 +179,9 @@ mod tests {
     #[test]
     fn idelta2_roundtrips() {
         // Includes a monotone ramp and a wrap-around to exercise signed deltas.
-        let vals: Vec<u64> = (0..1000u64).map(|i| i.wrapping_mul(3).wrapping_sub(7)).collect();
+        let vals: Vec<u64> = (0..1000u64)
+            .map(|i| i.wrapping_mul(3).wrapping_sub(7))
+            .collect();
         let enc = idelta2_encode(&vals);
         assert_eq!(idelta2_decode(&enc, vals.len()).unwrap(), vals);
     }

@@ -28,7 +28,13 @@ struct RangeEncoder {
 
 impl RangeEncoder {
     fn new() -> Self {
-        RangeEncoder { low: 0, range: 0xFFFF_FFFF, cache: 0, cache_size: 1, out: Vec::new() }
+        RangeEncoder {
+            low: 0,
+            range: 0xFFFF_FFFF,
+            cache: 0,
+            cache_size: 1,
+            out: Vec::new(),
+        }
     }
 
     fn shift_low(&mut self) {
@@ -87,7 +93,12 @@ struct RangeDecoder<'a> {
 
 impl<'a> RangeDecoder<'a> {
     fn new(input: &'a [u8]) -> Self {
-        let mut d = RangeDecoder { code: 0, range: 0xFFFF_FFFF, input, pos: 0 };
+        let mut d = RangeDecoder {
+            code: 0,
+            range: 0xFFFF_FFFF,
+            input,
+            pos: 0,
+        };
         d.next_byte(); // skip the encoder's initial dummy byte
         for _ in 0..4 {
             d.code = (d.code << 8) | d.next_byte();
@@ -136,7 +147,9 @@ struct ByteModel {
 
 impl ByteModel {
     fn new() -> Self {
-        ByteModel { probs: vec![PROB_INIT; 256 * 256] }
+        ByteModel {
+            probs: vec![PROB_INIT; 256 * 256],
+        }
     }
 
     #[inline]
@@ -206,7 +219,9 @@ mod tests {
     use super::*;
 
     fn lcg(s: &mut u64) -> u64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *s
     }
 
@@ -224,7 +239,13 @@ mod tests {
         // Mostly zeros with occasional spikes — should compress well.
         let mut s = 7u64;
         let data: Vec<u8> = (0..50_000)
-            .map(|_| if lcg(&mut s).is_multiple_of(16) { (lcg(&mut s) >> 40) as u8 } else { 0 })
+            .map(|_| {
+                if lcg(&mut s).is_multiple_of(16) {
+                    (lcg(&mut s) >> 40) as u8
+                } else {
+                    0
+                }
+            })
             .collect();
         let packed = compress_bytes(&data);
         assert!(packed.len() < data.len(), "skewed data should shrink");

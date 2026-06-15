@@ -62,7 +62,10 @@ fn lz_compress(input: &[u8]) -> Vec<u8> {
         }
 
         if best_len >= MIN_MATCH {
-            tokens.push(Token::Match { off: best_off as u32, len: best_len as u32 });
+            tokens.push(Token::Match {
+                off: best_off as u32,
+                len: best_len as u32,
+            });
             let end = i + best_len;
             while i < end {
                 if i + MIN_MATCH <= n {
@@ -168,9 +171,15 @@ mod tests {
     #[test]
     fn roundtrip_repetitive() {
         // 16-value dictionary cycled — classic LZ target.
-        let vals: Vec<u64> = (0..50_000u64).map(|i| (i & 15) as f64).map(f64::to_bits).collect();
+        let vals: Vec<u64> = (0..50_000u64)
+            .map(|i| (i & 15) as f64)
+            .map(f64::to_bits)
+            .collect();
         let enc = encode(&vals);
-        assert!(enc.len() < vals.len() * 8 / 4, "repetitive data should shrink a lot");
+        assert!(
+            enc.len() < vals.len() * 8 / 4,
+            "repetitive data should shrink a lot"
+        );
         assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
     }
 

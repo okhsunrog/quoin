@@ -26,7 +26,10 @@ impl fmt::Display for Error {
             Error::UnknownMode(m) => write!(f, "unknown block mode {m}"),
             Error::CorruptPayload(w) => write!(f, "corrupt payload: {w}"),
             Error::LengthMismatch { expected, got } => {
-                write!(f, "length mismatch: expected {expected} values, decoded {got}")
+                write!(
+                    f,
+                    "length mismatch: expected {expected} values, decoded {got}"
+                )
             }
         }
     }

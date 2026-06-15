@@ -13,7 +13,10 @@ fn assert_roundtrip(name: &str, data: &[f64]) -> f64 {
 
     let original = data.len() * 8;
     let ratio = original as f64 / packed.len().max(1) as f64;
-    println!("{name:>14}: {original:>9} -> {:>9} bytes  ratio {ratio:6.2}x", packed.len());
+    println!(
+        "{name:>14}: {original:>9} -> {:>9} bytes  ratio {ratio:6.2}x",
+        packed.len()
+    );
     ratio
 }
 
@@ -23,7 +26,9 @@ fn series(n: usize, f: impl FnMut(usize) -> f64) -> Vec<f64> {
 
 // Cheap deterministic PRNG so tests need no dependencies.
 fn lcg(seed: &mut u64) -> u64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *seed
 }
 
@@ -75,8 +80,14 @@ fn multi_block_roundtrip() {
 #[test]
 fn special_values() {
     let data = vec![
-        0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
-        f64::MIN, f64::MAX, f64::MIN_POSITIVE,
+        0.0,
+        -0.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MIN,
+        f64::MAX,
+        f64::MIN_POSITIVE,
     ];
     assert_roundtrip("special", &data);
 }

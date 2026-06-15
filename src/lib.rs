@@ -55,7 +55,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { predictor_log2: 16, threads: None }
+        Config {
+            predictor_log2: 16,
+            threads: None,
+        }
     }
 }
 
@@ -104,12 +107,14 @@ pub mod bench_internals {
     /// Fold the runtime-selected (hardware where available) CRC32C hash over a block.
     pub fn hash_fold_best(vals: &[u64]) -> u32 {
         let h = crate::hash::best_hash_fn();
-        vals.iter().fold(0u32, |c, &v| c ^ h(crate::hash::HASH_SEED, v))
+        vals.iter()
+            .fold(0u32, |c, &v| c ^ h(crate::hash::HASH_SEED, v))
     }
     /// Fold the bit-exact software CRC32C over a block (for hw-vs-sw comparison).
     pub fn hash_fold_sw(vals: &[u64]) -> u32 {
-        vals.iter()
-            .fold(0u32, |c, &v| c ^ crate::hash::crc32c_u64_sw(crate::hash::HASH_SEED, v))
+        vals.iter().fold(0u32, |c, &v| {
+            c ^ crate::hash::crc32c_u64_sw(crate::hash::HASH_SEED, v)
+        })
     }
 
     pub fn rc_compress(bytes: &[u8]) -> Vec<u8> {

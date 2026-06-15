@@ -31,7 +31,11 @@ fn quantize(counts: &[u32], which: &[u8], total: u64) -> Option<Vec<u16>> {
     if num == 0 || num > MAX_SYMS {
         return None;
     }
-    let mult = if total > 0 { TABLE_SIZE as f32 / total as f32 } else { 0.0 };
+    let mult = if total > 0 {
+        TABLE_SIZE as f32 / total as f32
+    } else {
+        0.0
+    };
     let mut desired = vec![0.0f32; num];
     let mut total_desired = 0.0f32;
     for (i, &sym) in which.iter().enumerate() {
@@ -109,14 +113,23 @@ pub(crate) fn compress_bytes(src: &[u8]) -> Option<Vec<u8>> {
     for &b in src {
         counts[b as usize] += 1;
     }
-    let which: Vec<u8> = (0..256u32).filter(|&b| counts[b as usize] > 0).map(|b| b as u8).collect();
+    let which: Vec<u8> = (0..256u32)
+        .filter(|&b| counts[b as usize] > 0)
+        .map(|b| b as u8)
+        .collect();
     let total: u64 = src.len() as u64;
     let weights = quantize(&counts, &which, total)?;
     let state_symbols = spread(&weights, &which);
 
     // Encoder tables.
-    let mut infos: Vec<SymInfo> =
-        (0..256).map(|_| SymInfo { renorm_cutoff: 0, min_renorm_bits: 0, weight: 0, cum: 0 }).collect();
+    let mut infos: Vec<SymInfo> = (0..256)
+        .map(|_| SymInfo {
+            renorm_cutoff: 0,
+            min_renorm_bits: 0,
+            weight: 0,
+            cum: 0,
+        })
+        .collect();
     let mut cum: u16 = 0;
     let mut fill_pos = vec![0u16; which.len()];
     for (s, &sym) in which.iter().enumerate() {
@@ -152,7 +165,11 @@ pub(crate) fn compress_bytes(src: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         let renorm_bits = info.min_renorm_bits + u8::from(state >= info.renorm_cutoff);
-        let low = if renorm_bits == 0 { 0 } else { state & ((1 << renorm_bits) - 1) };
+        let low = if renorm_bits == 0 {
+            0
+        } else {
+            state & ((1 << renorm_bits) - 1)
+        };
         let shifted = state >> renorm_bits;
         state = next_states[info.cum as usize + (shifted - u32::from(info.weight)) as usize];
         pairs.push((low as u16, renorm_bits));
@@ -217,7 +234,9 @@ pub(crate) fn decompress_bytes(src: &[u8], max_len: usize) -> Result<Vec<u8>, Er
         wsum += u32::from(weights[i]);
     }
     if wsum != TABLE_SIZE {
-        return Err(Error::CorruptPayload("tans weights do not sum to table size"));
+        return Err(Error::CorruptPayload(
+            "tans weights do not sum to table size",
+        ));
     }
 
     let state_symbols = spread(&weights, &which);
@@ -266,7 +285,9 @@ mod tests {
     use super::*;
 
     fn lcg(s: &mut u64) -> u64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *s
     }
 
@@ -274,7 +295,12 @@ mod tests {
         match compress_bytes(data) {
             Some(packed) => {
                 let restored = decompress_bytes(&packed, data.len()).unwrap();
-                assert_eq!(restored, data, "tans round-trip mismatch (len {})", data.len());
+                assert_eq!(
+                    restored,
+                    data,
+                    "tans round-trip mismatch (len {})",
+                    data.len()
+                );
             }
             None => { /* coder declined; caller falls back to rc */ }
         }
@@ -283,8 +309,15 @@ mod tests {
     #[test]
     fn roundtrip_skewed() {
         let mut s = 1u64;
-        let data: Vec<u8> =
-            (0..40_000).map(|_| if lcg(&mut s).is_multiple_of(8) { (lcg(&mut s) >> 50) as u8 } else { 0 }).collect();
+        let data: Vec<u8> = (0..40_000)
+            .map(|_| {
+                if lcg(&mut s).is_multiple_of(8) {
+                    (lcg(&mut s) >> 50) as u8
+                } else {
+                    0
+                }
+            })
+            .collect();
         let packed = compress_bytes(&data).expect("skewed compresses");
         assert!(packed.len() < data.len());
         assert_eq!(decompress_bytes(&packed, data.len()).unwrap(), data);
@@ -293,7 +326,11 @@ mod tests {
     #[test]
     fn roundtrip_uniform_and_single() {
         let mut s = 99u64;
-        check(&(0..40_000).map(|_| (lcg(&mut s) >> 40) as u8).collect::<Vec<_>>());
+        check(
+            &(0..40_000)
+                .map(|_| (lcg(&mut s) >> 40) as u8)
+                .collect::<Vec<_>>(),
+        );
         check(&vec![7u8; 5000]); // single distinct symbol
         check(&[42u8]);
         check(&[]);

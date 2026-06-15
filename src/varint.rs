@@ -44,7 +44,16 @@ mod tests {
 
     #[test]
     fn roundtrip_varints() {
-        let cases = [0u64, 1, 127, 128, 300, u32::MAX as u64, u64::MAX, 0x0123_4567_89ab_cdef];
+        let cases = [
+            0u64,
+            1,
+            127,
+            128,
+            300,
+            u32::MAX as u64,
+            u64::MAX,
+            0x0123_4567_89ab_cdef,
+        ];
         let mut buf = Vec::new();
         for &c in &cases {
             write_u64(&mut buf, c);

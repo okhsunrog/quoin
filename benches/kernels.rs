@@ -31,8 +31,12 @@ fn bench_hash(c: &mut Criterion) {
     let vals = smooth_bits();
     let mut g = c.benchmark_group("crc32c_hash");
     g.throughput(Throughput::Bytes((vals.len() * 8) as u64));
-    g.bench_function("hardware", |b| b.iter(|| bi::hash_fold_best(black_box(&vals))));
-    g.bench_function("software", |b| b.iter(|| bi::hash_fold_sw(black_box(&vals))));
+    g.bench_function("hardware", |b| {
+        b.iter(|| bi::hash_fold_best(black_box(&vals)))
+    });
+    g.bench_function("software", |b| {
+        b.iter(|| bi::hash_fold_sw(black_box(&vals)))
+    });
     g.finish();
 }
 
@@ -44,12 +48,16 @@ fn bench_entropy(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("entropy");
     g.throughput(Throughput::Bytes(residuals.len() as u64));
-    g.bench_function("rc_compress", |b| b.iter(|| bi::rc_compress(black_box(&residuals))));
+    g.bench_function("rc_compress", |b| {
+        b.iter(|| bi::rc_compress(black_box(&residuals)))
+    });
     g.bench_function("rc_decompress", |b| {
         b.iter(|| bi::rc_decompress(black_box(&rc), residuals.len()).unwrap())
     });
     if let Some(t) = tans {
-        g.bench_function("tans_compress", |b| b.iter(|| bi::tans_compress(black_box(&residuals))));
+        g.bench_function("tans_compress", |b| {
+            b.iter(|| bi::tans_compress(black_box(&residuals)))
+        });
         g.bench_function("tans_decompress", |b| {
             b.iter(|| bi::tans_decompress(black_box(&t), residuals.len()).unwrap())
         });
@@ -73,8 +81,12 @@ fn bench_predictors(c: &mut Criterion) {
     let vals = smooth_bits();
     let mut g = c.benchmark_group("predictors");
     g.throughput(Throughput::Bytes((vals.len() * 8) as u64));
-    g.bench_function("fcm_encode", |b| b.iter(|| bi::fcm_encode(black_box(&vals), 16)));
-    g.bench_function("dfcm_encode", |b| b.iter(|| bi::dfcm_encode(black_box(&vals), 16)));
+    g.bench_function("fcm_encode", |b| {
+        b.iter(|| bi::fcm_encode(black_box(&vals), 16))
+    });
+    g.bench_function("dfcm_encode", |b| {
+        b.iter(|| bi::dfcm_encode(black_box(&vals), 16))
+    });
     g.finish();
 }
 

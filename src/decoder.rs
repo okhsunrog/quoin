@@ -6,7 +6,7 @@
 use crate::codecs::{const_block, linear, lz, pred, raw, stride, transpose, xorz};
 use crate::entropy::decode_residuals;
 use crate::error::Error;
-use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN, MAX_BLOCK_VALUES};
+use crate::format::{FRAME_HEADER_LEN, HEADER_LEN, Header, MAX_BLOCK_VALUES};
 use crate::mode::Mode;
 
 /// Upper bound on a predictor residual stream: at most 10 LEB128 bytes/value.
@@ -53,12 +53,19 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
         if counted + n > n_total {
             return Err(Error::CorruptPayload("block overruns declared length"));
         }
-        frames.push(Frame { mode, n, payload: &src[pos..end] });
+        frames.push(Frame {
+            mode,
+            n,
+            payload: &src[pos..end],
+        });
         counted += n;
         pos = end;
     }
     if counted != n_total {
-        return Err(Error::LengthMismatch { expected: n_total, got: counted });
+        return Err(Error::LengthMismatch {
+            expected: n_total,
+            got: counted,
+        });
     }
 
     // Phase 2: decode blocks (parallel when enabled), then concatenate in order.
@@ -74,12 +81,18 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
 #[cfg(feature = "parallel")]
 fn decode_frames(frames: &[Frame<'_>], predictor_log2: u8) -> Result<Vec<Vec<u64>>, Error> {
     use rayon::prelude::*;
-    frames.par_iter().map(|f| decode_frame(f, predictor_log2)).collect()
+    frames
+        .par_iter()
+        .map(|f| decode_frame(f, predictor_log2))
+        .collect()
 }
 
 #[cfg(not(feature = "parallel"))]
 fn decode_frames(frames: &[Frame<'_>], predictor_log2: u8) -> Result<Vec<Vec<u64>>, Error> {
-    frames.iter().map(|f| decode_frame(f, predictor_log2)).collect()
+    frames
+        .iter()
+        .map(|f| decode_frame(f, predictor_log2))
+        .collect()
 }
 
 fn decode_frame(f: &Frame<'_>, predictor_log2: u8) -> Result<Vec<u64>, Error> {

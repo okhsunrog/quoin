@@ -10,7 +10,11 @@ pub(crate) struct BitWriter {
 
 impl BitWriter {
     pub(crate) fn new() -> Self {
-        BitWriter { out: Vec::new(), acc: 0, nbits: 0 }
+        BitWriter {
+            out: Vec::new(),
+            acc: 0,
+            nbits: 0,
+        }
     }
 
     /// Append the low `bits` bits of `val` (0..=57 bits per call is safe).
@@ -19,7 +23,11 @@ impl BitWriter {
         if bits == 0 {
             return;
         }
-        let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mask = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         self.acc = (self.acc << bits) | (val & mask);
         self.nbits += bits;
         while self.nbits >= 8 {
@@ -49,7 +57,12 @@ pub(crate) struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     pub(crate) fn new(data: &'a [u8]) -> Self {
-        BitReader { data, pos: 0, acc: 0, nbits: 0 }
+        BitReader {
+            data,
+            pos: 0,
+            acc: 0,
+            nbits: 0,
+        }
     }
 
     #[inline]
@@ -64,7 +77,11 @@ impl<'a> BitReader<'a> {
             self.nbits += 8;
         }
         self.nbits -= bits;
-        let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mask = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         let v = (self.acc >> self.nbits) & mask;
         self.acc &= (1u64 << self.nbits) - 1;
         v
@@ -77,8 +94,16 @@ mod tests {
 
     #[test]
     fn roundtrip_varied_widths() {
-        let items: &[(u64, u32)] =
-            &[(0, 1), (1, 1), (5, 3), (0, 0), (1023, 10), (255, 8), (0x1_2345, 17), (3, 2)];
+        let items: &[(u64, u32)] = &[
+            (0, 1),
+            (1, 1),
+            (5, 3),
+            (0, 0),
+            (1023, 10),
+            (255, 8),
+            (0x1_2345, 17),
+            (3, 2),
+        ];
         let mut w = BitWriter::new();
         for &(v, b) in items {
             w.put(v, b);

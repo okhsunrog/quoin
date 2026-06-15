@@ -55,7 +55,13 @@ fn g_ar2(n: usize) -> Vec<f64> {
 }
 fn g_piecewise(n: usize) -> Vec<f64> {
     (0..n)
-        .map(|i| if i < n / 2 { 1.0 } else { 1.0 + 1e-3 * (i - n / 2) as f64 })
+        .map(|i| {
+            if i < n / 2 {
+                1.0
+            } else {
+                1.0 + 1e-3 * (i - n / 2) as f64
+            }
+        })
         .collect()
 }
 fn g_intmul(n: usize) -> Vec<f64> {
@@ -194,8 +200,12 @@ struct Row {
 
 /// Top winning modes from a `mode_win_counts` snapshot, as `NAME×n` pairs.
 fn top_modes(counts: &[u64; 64]) -> String {
-    let mut v: Vec<(usize, u64)> =
-        counts.iter().enumerate().filter(|(_, c)| **c > 0).map(|(i, c)| (i, *c)).collect();
+    let mut v: Vec<(usize, u64)> = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c > 0)
+        .map(|(i, c)| (i, *c))
+        .collect();
     v.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
     v.iter()
         .take(3)
@@ -205,11 +215,18 @@ fn top_modes(counts: &[u64; 64]) -> String {
 }
 
 fn bits_eq(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len() && a.iter().map(|f| f.to_bits()).eq(b.iter().map(|f| f.to_bits()))
+    a.len() == b.len()
+        && a.iter()
+            .map(|f| f.to_bits())
+            .eq(b.iter().map(|f| f.to_bits()))
 }
 
 fn mbps(orig_bytes: usize, secs: f64) -> f64 {
-    if secs <= 0.0 { f64::INFINITY } else { orig_bytes as f64 / 1e6 / secs }
+    if secs <= 0.0 {
+        f64::INFINITY
+    } else {
+        orig_bytes as f64 / 1e6 / secs
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,15 +256,15 @@ fn bench_ours(data: &[f64], trials: usize) -> Row {
 #[cfg(feature = "bench-zstd")]
 fn bench_zstd(data: &[f64], level: i32, trials: usize) -> Row {
     let orig = data.len() * 8;
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, orig) };
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, orig) };
     let mut packed = Vec::new();
     let (enc_s, _) = time_median(trials, || {
         packed = zstd::bulk::compress(bytes, level).expect("zstd enc");
         packed.len()
     });
-    let (dec_s, restored) =
-        time_median(trials, || zstd::bulk::decompress(&packed, orig).expect("zstd dec"));
+    let (dec_s, restored) = time_median(trials, || {
+        zstd::bulk::decompress(&packed, orig).expect("zstd dec")
+    });
     Row {
         comp: packed.len(),
         ratio: orig as f64 / packed.len().max(1) as f64,
@@ -314,7 +331,11 @@ fn bench_fc(data: &[f64], trials: usize) -> Row {
 
 fn print_row(ds: &str, codec: &str, r: &Row) {
     let flag = if r.ok { "" } else { "  !! MISMATCH" };
-    let tail = if r.modes.is_empty() { flag.to_string() } else { format!("  {}{flag}", r.modes) };
+    let tail = if r.modes.is_empty() {
+        flag.to_string()
+    } else {
+        format!("  {}{flag}", r.modes)
+    };
     println!(
         "{ds:<16} {codec:<10} {:>10} {:>8.2}x {:>9.0} {:>9.0}{tail}",
         r.comp, r.ratio, r.enc_mbps, r.dec_mbps
@@ -332,7 +353,11 @@ fn main() {
         .unwrap_or(5);
 
     println!("{}", fp_compressor::VERSION);
-    println!("datasets: {} x {n} values ({} MiB each), median of {trials}\n", DATASETS.len(), n * 8 / (1 << 20));
+    println!(
+        "datasets: {} x {n} values ({} MiB each), median of {trials}\n",
+        DATASETS.len(),
+        n * 8 / (1 << 20)
+    );
     println!(
         "{:<16} {:<10} {:>10} {:>9} {:>9} {:>9}",
         "dataset", "codec", "bytes", "ratio", "enc MB/s", "dec MB/s"

@@ -7,7 +7,9 @@ use fp_compressor::{Config, compress, decompress};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn lcg(s: &mut u64) -> u64 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *s = s
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *s
 }
 
@@ -15,13 +17,15 @@ fn lcg(s: &mut u64) -> u64 {
 fn seeds() -> Vec<Vec<u8>> {
     let mut s = 1u64;
     let gens: Vec<Vec<f64>> = vec![
-        (0..4000).map(|i| i as f64 * 0.5).collect(),          // ramp -> idelta/dfcm
+        (0..4000).map(|i| i as f64 * 0.5).collect(), // ramp -> idelta/dfcm
         (0..4000).map(|i| (i as f64 * 0.01).sin()).collect(), // smooth -> delta2/rc/tans
-        (0..4000).map(|i| (i & 15) as f64).collect(),         // dict -> lz
+        (0..4000).map(|i| (i & 15) as f64).collect(), // dict -> lz
         (0..4000).map(|_| f64::from_bits(lcg(&mut s))).collect(), // random -> raw
-        vec![42.0; 4000],                                     // const
+        vec![42.0; 4000],                            // const
     ];
-    gens.iter().map(|d| compress(d, Config::default())).collect()
+    gens.iter()
+        .map(|d| compress(d, Config::default()))
+        .collect()
 }
 
 fn assert_no_panic(label: &str, iters: usize, mut make: impl FnMut() -> Vec<u8>) {
@@ -87,8 +91,18 @@ fn adversarial_roundtrip() {
         vec![],
         vec![0.0],
         vec![f64::NAN; 1000],
-        (0..5000).map(|i| if i % 2 == 0 { f64::INFINITY } else { f64::NEG_INFINITY }).collect(),
-        (0..5000).map(|_| f64::from_bits(lcg(&mut s) & 0xFFF0_0000_0000_0000)).collect(),
+        (0..5000)
+            .map(|i| {
+                if i % 2 == 0 {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                }
+            })
+            .collect(),
+        (0..5000)
+            .map(|_| f64::from_bits(lcg(&mut s) & 0xFFF0_0000_0000_0000))
+            .collect(),
         (0..70_000).map(|i| (i as f64).sqrt()).collect(), // multi-block
     ];
     for data in cases {

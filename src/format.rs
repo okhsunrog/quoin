@@ -63,6 +63,9 @@ impl Header {
             return Err(Error::CorruptPayload("predictor_log2 out of range"));
         }
         let n_values = u64::from_le_bytes(src[8..16].try_into().unwrap());
-        Ok(Header { predictor_log2, n_values })
+        Ok(Header {
+            predictor_log2,
+            n_values,
+        })
     }
 }
