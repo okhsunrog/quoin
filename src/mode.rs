@@ -17,6 +17,8 @@ pub enum Mode {
     Xorz = 3,
     /// Verbatim little-endian `u64` words. Always-available fallback.
     Raw = 5,
+    /// FCM predictor residuals, range-coded (order-1 adaptive model).
+    PredRc = 29,
 }
 
 impl Mode {
@@ -31,6 +33,7 @@ impl Mode {
             2 => Mode::Stride,
             3 => Mode::Xorz,
             5 => Mode::Raw,
+            29 => Mode::PredRc,
             other => return Err(Error::UnknownMode(other)),
         })
     }

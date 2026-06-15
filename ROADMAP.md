@@ -13,15 +13,18 @@ original is one ~6,200-line C file with ~50 codecs; this tracks the port.
       software fallback, runtime-dispatched); `multiversion` lane-wise transform.
 - [x] Codecs: `RAW`, `CONST`, `STRIDE`, `XORZ`, `PRED` (FCM + XOR + LEB128).
 - [x] Round-trip tests across synthetic datasets (incl. NaN / ±0 / inf).
+- [x] Benchmark harness vs zstd (vendored) and the C `fc` (FFI), 17 datasets.
+- [x] **Binary range coder** (LZMA-style) + adaptive order-1 byte model.
+- [x] `PRED_RC` (range-coded predictor residuals). Aggregate ratio 1.73→2.02×.
 
 ## Building blocks to port next
 
 These unlock most of the remaining modes:
 
-- [ ] **Bit reader/writer** (`bw_t`/`br_t`) — needed by most residual coders.
+- [ ] **Bit reader/writer** (`bw_t`/`br_t`) — needed by tANS and bit-packers.
 - [ ] **tANS** (table ANS, 8-bit symbols) — `PRED_TANS`, `FUZZY_STRIDE_ANS`,
-      `BWT_MTF_TANS`.
-- [ ] **Binary range coder** — `PRED_RC`, `BWT_MTF_RC`, byte-stream RC.
+      `BWT_MTF_TANS`. Faster decode than the binary RC; `fc`'s common winner.
+- [x] **Binary range coder** — done; reused by `BWT_MTF_RC`, future direct models.
 - [ ] **DFCM predictor** + 2-way set-associative variants — `PRED2`, `PRED4`.
 - [ ] **AVX2 gather predictor** (`_mm256_i64gather_epi64`) — the second hot
       kernel; `PRED_SIMD_INTERLEAVED`, `PRED_INTERLEAVED`.

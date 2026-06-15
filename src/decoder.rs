@@ -1,6 +1,6 @@
 //! Stream decoder: walk the block frames and dispatch each to its codec.
 
-use crate::codecs::{const_block, pred, raw, stride, xorz};
+use crate::codecs::{const_block, pred, pred_rc, raw, stride, xorz};
 use crate::error::Error;
 use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN};
 use crate::mode::Mode;
@@ -41,6 +41,7 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
             Mode::Stride => stride::decode(payload, n)?,
             Mode::Xorz => xorz::decode(payload, n)?,
             Mode::Pred => pred::decode(payload, n, predictor_log2)?,
+            Mode::PredRc => pred_rc::decode(payload, n, predictor_log2)?,
         };
         bits.extend_from_slice(&decoded);
     }

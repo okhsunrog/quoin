@@ -8,6 +8,10 @@
 //!
 //! Env: FCBENCH_N (values per dataset, default 1<<20), FCBENCH_TRIALS (default 5).
 
+// The dataset generators are ported 1:1 from fc/test_fc.c, including its
+// hand-written `3.14159265358979` literal — keep it for byte-identical data.
+#![allow(clippy::approx_constant)]
+
 use std::time::Instant;
 
 use fp_compressor::{Config, compress, decompress};

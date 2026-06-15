@@ -25,6 +25,7 @@
 mod codecs;
 mod decoder;
 mod encoder;
+mod entropy;
 mod error;
 mod format;
 mod hash;

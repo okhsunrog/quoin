@@ -7,7 +7,7 @@
 //! this pass is single-threaded.
 
 use crate::Config;
-use crate::codecs::{const_block, pred, raw, stride, xorz};
+use crate::codecs::{const_block, pred, pred_rc, raw, stride, xorz};
 use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
 
@@ -46,12 +46,17 @@ fn encode_block(block: &[u64], predictor_log2: u8, out: &mut Vec<u8>) {
         consider(Mode::Stride, p, &mut best_mode, &mut best_payload);
     }
     consider(Mode::Xorz, xorz::encode(block), &mut best_mode, &mut best_payload);
+
+    // Run the predictor once; PRED stores the residuals verbatim while PRED_RC
+    // range-codes the same stream.
+    let residuals = pred::encode(block, predictor_log2);
     consider(
-        Mode::Pred,
-        pred::encode(block, predictor_log2),
+        Mode::PredRc,
+        pred_rc::encode_from_residuals(&residuals),
         &mut best_mode,
         &mut best_payload,
     );
+    consider(Mode::Pred, residuals, &mut best_mode, &mut best_payload);
 
     write_frame(best_mode, block.len(), &best_payload, out);
 }
