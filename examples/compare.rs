@@ -196,7 +196,7 @@ struct Row {
 fn top_modes(counts: &[u64; 64]) -> String {
     let mut v: Vec<(usize, u64)> =
         counts.iter().enumerate().filter(|(_, c)| **c > 0).map(|(i, c)| (i, *c)).collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
     v.iter()
         .take(3)
         .map(|(m, c)| format!("{}×{}", fp_compressor::mode_name(*m as u8), c))
