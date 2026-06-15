@@ -79,3 +79,42 @@ pub fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
 pub fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
     decoder::decompress(src)
 }
+
+/// Internal kernels re-exported so the `benches/kernels.rs` criterion harness
+/// (a separate crate) can measure them. **Not a stable API** — hidden from
+/// docs and exempt from semver.
+#[doc(hidden)]
+pub mod bench_internals {
+    use crate::Error;
+
+    /// Fold the runtime-selected (hardware where available) CRC32C hash over a block.
+    pub fn hash_fold_best(vals: &[u64]) -> u32 {
+        let h = crate::hash::best_hash_fn();
+        vals.iter().fold(0u32, |c, &v| c ^ h(crate::hash::HASH_SEED, v))
+    }
+    /// Fold the bit-exact software CRC32C over a block (for hw-vs-sw comparison).
+    pub fn hash_fold_sw(vals: &[u64]) -> u32 {
+        vals.iter()
+            .fold(0u32, |c, &v| c ^ crate::hash::crc32c_u64_sw(crate::hash::HASH_SEED, v))
+    }
+
+    pub fn rc_compress(bytes: &[u8]) -> Vec<u8> {
+        crate::entropy::rc::compress_bytes(bytes)
+    }
+    pub fn rc_decompress(bytes: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
+        crate::entropy::rc::decompress_bytes(bytes, max_len)
+    }
+    pub fn tans_compress(bytes: &[u8]) -> Option<Vec<u8>> {
+        crate::entropy::tans::compress_bytes(bytes)
+    }
+    pub fn tans_decompress(bytes: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
+        crate::entropy::tans::decompress_bytes(bytes, max_len)
+    }
+
+    pub fn fcm_encode(vals: &[u64], predictor_log2: u8) -> Vec<u8> {
+        crate::codecs::pred::encode(vals, predictor_log2)
+    }
+    pub fn dfcm_encode(vals: &[u64], predictor_log2: u8) -> Vec<u8> {
+        crate::codecs::pred::dfcm_encode(vals, predictor_log2)
+    }
+}

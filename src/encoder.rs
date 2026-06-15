@@ -7,7 +7,7 @@
 //! `parallel` feature they are encoded across a rayon pool.
 
 use crate::Config;
-use crate::codecs::{const_block, linear, pred, raw, stride, xorz};
+use crate::codecs::{const_block, linear, lz, pred, raw, stride, xorz};
 use crate::entropy::code_residuals;
 use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
@@ -103,6 +103,14 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     let idelta2_res = linear::idelta2_encode(block);
     if looks_compressible(idelta2_res.len(), raw_bytes) {
         consider(Mode::OrderedDelta, code_residuals(&idelta2_res), &mut best_mode, &mut best_payload);
+    }
+
+    // LZ: catches repeating-value structure the predictors miss (dictionaries,
+    // quantized levels, cent-rounded prices). Gated on the block already showing
+    // structure, so random data skips the match finder.
+    if looks_compressible(best_payload.len(), raw_bytes) {
+        let lz_res = lz::encode(block);
+        consider(Mode::Lz, code_residuals(&lz_res), &mut best_mode, &mut best_payload);
     }
 
     frame_bytes(best_mode, block.len(), &best_payload)

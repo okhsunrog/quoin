@@ -3,7 +3,7 @@
 //! located blocks — in parallel with the `parallel` feature, since each block
 //! is self-contained.
 
-use crate::codecs::{const_block, linear, pred, raw, stride, xorz};
+use crate::codecs::{const_block, linear, lz, pred, raw, stride, xorz};
 use crate::entropy::decode_residuals;
 use crate::error::Error;
 use crate::format::{Header, FRAME_HEADER_LEN, HEADER_LEN};
@@ -99,6 +99,10 @@ fn decode_frame(f: &Frame<'_>, predictor_log2: u8) -> Result<Vec<u64>, Error> {
         Mode::OrderedDelta => {
             let resid = decode_residuals(payload, resid_bound(n))?;
             linear::idelta2_decode(&resid, n)?
+        }
+        Mode::Lz => {
+            let lz_bytes = decode_residuals(payload, n.saturating_mul(16) + 1024)?;
+            lz::decode(&lz_bytes, n)?
         }
     })
 }
