@@ -8,7 +8,7 @@
 
 use crate::Config;
 use crate::codecs::{const_block, pred, raw, stride, xorz};
-use crate::entropy::rc;
+use crate::entropy::code_residuals;
 use crate::format::{Header, FRAME_HEADER_LEN};
 use crate::mode::Mode;
 
@@ -54,15 +54,15 @@ fn encode_block(block: &[u64], predictor_log2: u8, out: &mut Vec<u8>) {
     // residual stream looks compressible, also range-code them (PRED_RC).
     let fcm_res = pred::encode(block, predictor_log2);
     if looks_compressible(fcm_res.len(), raw_bytes) {
-        consider(Mode::PredRc, rc::compress_bytes(&fcm_res), &mut best_mode, &mut best_payload);
+        consider(Mode::PredRc, code_residuals(&fcm_res), &mut best_mode, &mut best_payload);
     }
     consider(Mode::Pred, fcm_res, &mut best_mode, &mut best_payload);
 
-    // DFCM predictor (range-coded only): wins on smooth/ramp data where FCM's
+    // DFCM predictor (entropy-coded only): wins on smooth/ramp data where FCM's
     // exact-repeat prediction fails but the deltas are predictable.
     let dfcm_res = pred::dfcm_encode(block, predictor_log2);
     if looks_compressible(dfcm_res.len(), raw_bytes) {
-        consider(Mode::Pred2, rc::compress_bytes(&dfcm_res), &mut best_mode, &mut best_payload);
+        consider(Mode::Pred2, code_residuals(&dfcm_res), &mut best_mode, &mut best_payload);
     }
 
     write_frame(best_mode, block.len(), &best_payload, out);

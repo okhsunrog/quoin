@@ -22,6 +22,7 @@
 //! assert_eq!(data, restored);
 //! ```
 
+mod bitio;
 mod codecs;
 mod decoder;
 mod encoder;
