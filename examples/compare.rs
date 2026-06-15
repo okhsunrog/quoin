@@ -189,6 +189,19 @@ struct Row {
     enc_mbps: f64,
     dec_mbps: f64,
     ok: bool,
+    modes: String,
+}
+
+/// Top winning modes from a `mode_win_counts` snapshot, as `NAME×n` pairs.
+fn top_modes(counts: &[u64; 64]) -> String {
+    let mut v: Vec<(usize, u64)> =
+        counts.iter().enumerate().filter(|(_, c)| **c > 0).map(|(i, c)| (i, *c)).collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.iter()
+        .take(3)
+        .map(|(m, c)| format!("{}×{}", fp_compressor::mode_name(*m as u8), c))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn bits_eq(a: &[f64], b: &[f64]) -> bool {
@@ -206,10 +219,12 @@ fn mbps(orig_bytes: usize, secs: f64) -> f64 {
 fn bench_ours(data: &[f64], trials: usize) -> Row {
     let orig = data.len() * 8;
     let mut packed = Vec::new();
+    fp_compressor::reset_mode_win_counts();
     let (enc_s, _) = time_median(trials, || {
         packed = compress(data, Config::default());
         packed.len()
     });
+    let modes = top_modes(&fp_compressor::mode_win_counts());
     let (dec_s, restored) = time_median(trials, || decompress(&packed).expect("decode"));
     Row {
         comp: packed.len(),
@@ -217,6 +232,7 @@ fn bench_ours(data: &[f64], trials: usize) -> Row {
         enc_mbps: mbps(orig, enc_s),
         dec_mbps: mbps(orig, dec_s),
         ok: bits_eq(data, &restored),
+        modes,
     }
 }
 
@@ -238,6 +254,7 @@ fn bench_zstd(data: &[f64], level: i32, trials: usize) -> Row {
         enc_mbps: mbps(orig, enc_s),
         dec_mbps: mbps(orig, dec_s),
         ok: restored == bytes,
+        modes: String::new(),
     }
 }
 
@@ -289,6 +306,7 @@ fn bench_fc(data: &[f64], trials: usize) -> Row {
         enc_mbps: mbps(orig, enc_s),
         dec_mbps: mbps(orig, dec_s),
         ok: bits_eq(data, &out),
+        modes: String::new(),
     }
 }
 
@@ -296,8 +314,9 @@ fn bench_fc(data: &[f64], trials: usize) -> Row {
 
 fn print_row(ds: &str, codec: &str, r: &Row) {
     let flag = if r.ok { "" } else { "  !! MISMATCH" };
+    let tail = if r.modes.is_empty() { flag.to_string() } else { format!("  {}{flag}", r.modes) };
     println!(
-        "{ds:<16} {codec:<10} {:>10} {:>8.2}x {:>9.0} {:>9.0}{flag}",
+        "{ds:<16} {codec:<10} {:>10} {:>8.2}x {:>9.0} {:>9.0}{tail}",
         r.comp, r.ratio, r.enc_mbps, r.dec_mbps
     );
 }

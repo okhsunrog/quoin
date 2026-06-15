@@ -25,6 +25,7 @@
 mod bitio;
 mod codecs;
 mod decoder;
+mod diag;
 mod encoder;
 mod entropy;
 mod error;
@@ -78,6 +79,19 @@ pub fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
 /// zeros), this returns [`Error::UnknownMode`] on any unrecognized block.
 pub fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
     decoder::decompress(src)
+}
+
+/// Per-mode win counts since the last [`reset_mode_win_counts`], indexed by
+/// mode ID (see [`mode_name`]). Counts how many blocks each mode won the
+/// encoder competition for — diagnostics only. Updated atomically across the
+/// encode thread pool.
+pub fn mode_win_counts() -> [u64; 64] {
+    diag::snapshot()
+}
+
+/// Reset the [`mode_win_counts`] counters to zero.
+pub fn reset_mode_win_counts() {
+    diag::reset();
 }
 
 /// Internal kernels re-exported so the `benches/kernels.rs` criterion harness

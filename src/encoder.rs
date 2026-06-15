@@ -126,6 +126,7 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
         consider(Mode::ByteTranspose, code_residuals(&soa), &mut best_mode, &mut best_payload);
     }
 
+    crate::diag::record_win(best_mode.id());
     frame_bytes(best_mode, block.len(), &best_payload)
 }
 
