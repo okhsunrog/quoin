@@ -30,7 +30,7 @@ fn lcg(seed: &mut u64) -> u64 {
 #[test]
 fn empty_and_tiny() {
     assert_roundtrip("empty", &[]);
-    assert_roundtrip("one", &[3.14]);
+    assert_roundtrip("one", &[2.5]);
     assert_roundtrip("two", &[1.0, 2.0]);
 }
 
