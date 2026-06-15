@@ -14,6 +14,8 @@ categories = ["compression"]
 # Avoids the per-call overhead of `is_x86_feature_detected!` and generates
 # baseline / AVX2 / AVX-512 clones from a single attribute.
 multiversion = "0.8.0"
+# Block-parallel encode/decode; behind the default-on `parallel` feature.
+rayon = { version = "1.12.0", optional = true }
 zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
@@ -24,6 +26,9 @@ lto = "thin"
 codegen-units = 1
 
 [features]
+default = ["parallel"]
+# Block-parallel encode/decode via rayon. Off → single-threaded, no rayon dep.
+parallel = ["dep:rayon"]
 # Compare against zstd (vendored) in the bench harness.
 bench-zstd = ["dep:zstd"]
 # Compare against the upstream C `fc` library, compiled and linked via FFI.

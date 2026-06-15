@@ -1,4 +1,7 @@
-//! Stream decoder: walk the block frames and dispatch each to its codec.
+//! Stream decoder. Two phases: scan the frame table sequentially (frame
+//! lengths are variable, so boundaries must be found in order), then decode the
+//! located blocks — in parallel with the `parallel` feature, since each block
+//! is self-contained.
 
 use crate::codecs::{const_block, linear, pred, raw, stride, xorz};
 use crate::entropy::decode_residuals;
@@ -12,16 +15,23 @@ fn resid_bound(n: usize) -> usize {
     n.saturating_mul(10) + 16
 }
 
+/// A located block: its mode, value count, and payload slice.
+struct Frame<'a> {
+    mode: Mode,
+    n: usize,
+    payload: &'a [u8],
+}
+
 pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
     let header = Header::read(src)?;
     let predictor_log2 = header.predictor_log2;
     let n_total = usize::try_from(header.n_values).map_err(|_| Error::Truncated)?;
 
-    let mut bits: Vec<u64> = Vec::with_capacity(n_total);
+    // Phase 1: scan frame boundaries (sequential, cheap, fully validated).
+    let mut frames: Vec<Frame<'_>> = Vec::new();
+    let mut counted = 0usize;
     let mut pos = HEADER_LEN;
-
-    while bits.len() < n_total {
-        // Frame header.
+    while counted < n_total {
         if pos + FRAME_HEADER_LEN > src.len() {
             return Err(Error::Truncated);
         }
@@ -30,43 +40,61 @@ pub(crate) fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
         let plen = u32::from_le_bytes(src[pos + 5..pos + 9].try_into().unwrap()) as usize;
         pos += FRAME_HEADER_LEN;
 
-        // Payload.
         let end = pos.checked_add(plen).ok_or(Error::Truncated)?;
         if end > src.len() {
             return Err(Error::Truncated);
         }
-        let payload = &src[pos..end];
-        pos = end;
-
-        if bits.len() + n > n_total {
+        if counted + n > n_total {
             return Err(Error::CorruptPayload("block overruns declared length"));
         }
-
-        let decoded = match mode {
-            Mode::Raw => raw::decode(payload, n)?,
-            Mode::Const => const_block::decode(payload, n)?,
-            Mode::Stride => stride::decode(payload, n)?,
-            Mode::Xorz => xorz::decode(payload, n)?,
-            Mode::Pred => pred::decode(payload, n, predictor_log2)?,
-            Mode::PredRc => {
-                let resid = decode_residuals(payload, resid_bound(n))?;
-                pred::decode(&resid, n, predictor_log2)?
-            }
-            Mode::Pred2 => {
-                let resid = decode_residuals(payload, resid_bound(n))?;
-                pred::dfcm_decode(&resid, n, predictor_log2)?
-            }
-            Mode::Delta2 => {
-                let resid = decode_residuals(payload, resid_bound(n))?;
-                linear::decode(&resid, n)?
-            }
-        };
-        bits.extend_from_slice(&decoded);
+        frames.push(Frame { mode, n, payload: &src[pos..end] });
+        counted += n;
+        pos = end;
+    }
+    if counted != n_total {
+        return Err(Error::LengthMismatch { expected: n_total, got: counted });
     }
 
-    if bits.len() != n_total {
-        return Err(Error::LengthMismatch { expected: n_total, got: bits.len() });
-    }
+    // Phase 2: decode blocks (parallel when enabled), then concatenate in order.
+    let decoded = decode_frames(&frames, predictor_log2)?;
 
+    let mut bits: Vec<u64> = Vec::with_capacity(n_total);
+    for block in &decoded {
+        bits.extend_from_slice(block);
+    }
     Ok(bits.into_iter().map(f64::from_bits).collect())
+}
+
+#[cfg(feature = "parallel")]
+fn decode_frames(frames: &[Frame<'_>], predictor_log2: u8) -> Result<Vec<Vec<u64>>, Error> {
+    use rayon::prelude::*;
+    frames.par_iter().map(|f| decode_frame(f, predictor_log2)).collect()
+}
+
+#[cfg(not(feature = "parallel"))]
+fn decode_frames(frames: &[Frame<'_>], predictor_log2: u8) -> Result<Vec<Vec<u64>>, Error> {
+    frames.iter().map(|f| decode_frame(f, predictor_log2)).collect()
+}
+
+fn decode_frame(f: &Frame<'_>, predictor_log2: u8) -> Result<Vec<u64>, Error> {
+    let (payload, n) = (f.payload, f.n);
+    Ok(match f.mode {
+        Mode::Raw => raw::decode(payload, n)?,
+        Mode::Const => const_block::decode(payload, n)?,
+        Mode::Stride => stride::decode(payload, n)?,
+        Mode::Xorz => xorz::decode(payload, n)?,
+        Mode::Pred => pred::decode(payload, n, predictor_log2)?,
+        Mode::PredRc => {
+            let resid = decode_residuals(payload, resid_bound(n))?;
+            pred::decode(&resid, n, predictor_log2)?
+        }
+        Mode::Pred2 => {
+            let resid = decode_residuals(payload, resid_bound(n))?;
+            pred::dfcm_decode(&resid, n, predictor_log2)?
+        }
+        Mode::Delta2 => {
+            let resid = decode_residuals(payload, resid_bound(n))?;
+            linear::decode(&resid, n)?
+        }
+    })
 }

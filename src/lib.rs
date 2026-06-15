@@ -45,11 +45,16 @@ pub const VERSION: &str = concat!("fp-compressor ", env!("CARGO_PKG_VERSION"));
 pub struct Config {
     /// log2 of the predictor table size. Clamped to `[10, 16]` (as in `fc`).
     pub predictor_log2: u8,
+    /// Encoder worker threads. `None` lets rayon use the global pool (all
+    /// cores); `Some(n)` runs on a local pool of `n`. Ignored without the
+    /// `parallel` feature. Blocks are independent, so this scales nearly
+    /// linearly.
+    pub threads: Option<usize>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { predictor_log2: 16 }
+        Config { predictor_log2: 16, threads: None }
     }
 }
 

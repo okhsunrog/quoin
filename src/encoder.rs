@@ -1,10 +1,10 @@
 //! Block planning and the mode competition.
 //!
-//! For now blocks are a fixed quantum of values (the original `fc` uses an
-//! adaptive 256 KiB–1 MiB quantum; adaptive sizing is a roadmap item). Each
-//! block is encoded by every applicable mode and the smallest output wins —
-//! the core idea that buys `fc` its ratio. Threading is also a roadmap item;
-//! this pass is single-threaded.
+//! Blocks are a fixed quantum of values (the original `fc` uses an adaptive
+//! 256 KiB–1 MiB quantum; adaptive sizing is a roadmap item). Each block is
+//! encoded by every applicable mode and the smallest output wins — the core
+//! idea that buys `fc` its ratio. Blocks are independent, so with the
+//! `parallel` feature they are encoded across a rayon pool.
 
 use crate::Config;
 use crate::codecs::{const_block, linear, pred, raw, stride, xorz};
@@ -19,16 +19,42 @@ pub(crate) fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
     let predictor_log2 = cfg.clamped_predictor_log2();
     let vals: Vec<u64> = src.iter().map(|f| f.to_bits()).collect();
 
-    let mut out = Vec::with_capacity(src.len() * 8 / 2 + 64);
-    Header { predictor_log2, n_values: vals.len() as u64 }.write(&mut out);
+    let frames = build_frames(&vals, predictor_log2, cfg.threads);
 
-    for block in vals.chunks(QUANTUM_VALUES) {
-        encode_block(block, predictor_log2, &mut out);
+    let total: usize = frames.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(crate::format::HEADER_LEN + total);
+    Header { predictor_log2, n_values: vals.len() as u64 }.write(&mut out);
+    for f in &frames {
+        out.extend_from_slice(f);
     }
     out
 }
 
-fn encode_block(block: &[u64], predictor_log2: u8, out: &mut Vec<u8>) {
+#[cfg(feature = "parallel")]
+fn build_frames(vals: &[u64], predictor_log2: u8, threads: Option<usize>) -> Vec<Vec<u8>> {
+    use rayon::prelude::*;
+    let run = || {
+        vals.par_chunks(QUANTUM_VALUES)
+            .map(|block| encode_block(block, predictor_log2))
+            .collect::<Vec<_>>()
+    };
+    match threads {
+        Some(n) if n > 0 => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+            Ok(pool) => pool.install(run),
+            Err(_) => run(),
+        },
+        _ => run(), // None or Some(0): use rayon's global pool (all cores)
+    }
+}
+
+#[cfg(not(feature = "parallel"))]
+fn build_frames(vals: &[u64], predictor_log2: u8, _threads: Option<usize>) -> Vec<Vec<u8>> {
+    vals.chunks(QUANTUM_VALUES)
+        .map(|block| encode_block(block, predictor_log2))
+        .collect()
+}
+
+fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     // RAW is the always-available baseline; every other mode must beat it.
     let mut best_mode = Mode::Raw;
     let mut best_payload = raw::encode(block);
@@ -72,7 +98,7 @@ fn encode_block(block: &[u64], predictor_log2: u8, out: &mut Vec<u8>) {
         consider(Mode::Delta2, code_residuals(&lin2_res), &mut best_mode, &mut best_payload);
     }
 
-    write_frame(best_mode, block.len(), &best_payload, out);
+    frame_bytes(best_mode, block.len(), &best_payload)
 }
 
 /// Cheap gate for the expensive range-coded modes: only bother when the
@@ -83,10 +109,11 @@ fn looks_compressible(residual_bytes: usize, raw_bytes: usize) -> bool {
     residual_bytes.saturating_mul(20) < raw_bytes.saturating_mul(19)
 }
 
-fn write_frame(mode: Mode, n_values: usize, payload: &[u8], out: &mut Vec<u8>) {
-    out.reserve(FRAME_HEADER_LEN + payload.len());
+fn frame_bytes(mode: Mode, n_values: usize, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
     out.push(mode.id());
     out.extend_from_slice(&(n_values as u32).to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(payload);
+    out
 }
