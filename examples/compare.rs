@@ -2,9 +2,9 @@
 //! same 17 synthetic datasets as the upstream C `fc` test harness.
 //!
 //! Usage:
-//!   cargo run --release --bin bench
-//!   cargo run --release --bin bench --features bench-zstd
-//!   FC_SRC_DIR=../fc cargo run --release --bin bench --features bench-zstd,bench-fc
+//!   cargo run --release --example compare
+//!   cargo run --release --example compare --features bench-zstd
+//!   FC_SRC_DIR=../fc cargo run --release --example compare --features bench-zstd,bench-fc
 //!
 //! Env: FCBENCH_N (values per dataset, default 1<<20), FCBENCH_TRIALS (default 5).
 

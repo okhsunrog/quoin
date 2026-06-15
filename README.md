@@ -15,8 +15,9 @@ the aggregate ratio is **2.78×** (vs the C `fc` 3.07× and zstd-9 2.09×), with
 int-x1000 (7127×). Remaining `fc` modes and the known gaps (parabolic, the
 LZ-friendly repeating-value sets) are tracked in [`ROADMAP.md`](ROADMAP.md).
 
-Run `cargo run --release --bin bench --features bench-zstd,bench-fc` (with
-`FC_SRC_DIR` pointing at an `fc` checkout) to reproduce the comparison.
+Run `cargo run --release --example compare --features bench-zstd,bench-fc`
+(with `FC_SRC_DIR` pointing at an `fc` checkout) to reproduce the comparison.
+Kernel-level micro-benchmarks live in `benches/kernels.rs` (`cargo bench`).
 
 ```rust
 use fp_compressor::{compress, decompress, Config};
