@@ -105,6 +105,66 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
     Ok(out)
 }
 
+/// DELTA_DP: like [`encode`] but stores the *floating-point* residual
+/// `r = v - pred` (bit pattern, delta-coded) instead of the XOR. For smooth
+/// data the subtraction is exact (Sterbenz) and the residual is tiny and often
+/// constant — e.g. a parabola's second difference is exactly `1.0`.
+///
+/// Float subtract/add is only invertible when the subtraction is exact, so the
+/// encoder **verifies** `pred + r == v` bit-for-bit and returns `None` if any
+/// value fails (another mode then wins). The decoder can therefore trust that
+/// reconstruction is exact.
+pub(crate) fn dp_encode(vals: &[u64]) -> Option<Vec<u8>> {
+    if vals.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(vals.len());
+    let (mut prev1, mut prev2) = (0.0f64, 0.0f64);
+    let mut prev_rbits = 0u64;
+    for (i, &bits) in vals.iter().enumerate() {
+        let v = f64::from_bits(bits);
+        let pred = match i {
+            0 => 0.0,
+            1 => prev1,
+            _ => 2.0 * prev1 - prev2,
+        };
+        let r = v - pred;
+        if (pred + r).to_bits() != bits {
+            return None; // not exactly invertible for this block
+        }
+        let rbits = r.to_bits();
+        varint::write_u64(&mut out, rbits ^ prev_rbits);
+        prev_rbits = rbits;
+        prev2 = prev1;
+        prev1 = v;
+    }
+    Some(out)
+}
+
+pub(crate) fn dp_decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+    let mut out = Vec::with_capacity(n);
+    let (mut prev1, mut prev2) = (0.0f64, 0.0f64);
+    let mut prev_rbits = 0u64;
+    let mut pos = 0usize;
+    for i in 0..n {
+        let pred = match i {
+            0 => 0.0,
+            1 => prev1,
+            _ => 2.0 * prev1 - prev2,
+        };
+        let rbits = varint::read_u64(payload, &mut pos)? ^ prev_rbits;
+        let v = pred + f64::from_bits(rbits);
+        out.push(v.to_bits());
+        prev_rbits = rbits;
+        prev2 = prev1;
+        prev1 = v;
+    }
+    if pos != payload.len() {
+        return Err(Error::CorruptPayload("delta_dp trailing bytes"));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

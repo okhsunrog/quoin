@@ -27,6 +27,9 @@ pub enum Mode {
     Delta2 = 20,
     /// DFCM (differential FCM) predictor residuals, range-coded.
     Pred2 = 25,
+    /// Second-order linear prediction storing the exact float residual (verified
+    /// lossless). Nails polynomial/smooth data (constant second difference).
+    DeltaDp = 45,
     /// FCM predictor residuals, range-coded (order-1 adaptive model).
     PredRc = 29,
 }
@@ -48,6 +51,7 @@ impl Mode {
             7 => Mode::OrderedDelta,
             20 => Mode::Delta2,
             25 => Mode::Pred2,
+            45 => Mode::DeltaDp,
             29 => Mode::PredRc,
             other => return Err(Error::UnknownMode(other)),
         })

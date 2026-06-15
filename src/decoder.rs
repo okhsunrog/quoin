@@ -102,6 +102,10 @@ fn decode_frame(f: &Frame<'_>, predictor_log2: u8) -> Result<Vec<u64>, Error> {
             let resid = decode_residuals(payload, resid_bound(n))?;
             linear::decode(&resid, n)?
         }
+        Mode::DeltaDp => {
+            let resid = decode_residuals(payload, resid_bound(n))?;
+            linear::dp_decode(&resid, n)?
+        }
         Mode::OrderedDelta => {
             let resid = decode_residuals(payload, resid_bound(n))?;
             linear::idelta2_decode(&resid, n)?

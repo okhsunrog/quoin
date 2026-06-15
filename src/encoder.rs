@@ -97,6 +97,13 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     let lin2_res = linear::encode(block);
     if looks_compressible(lin2_res.len(), raw_bytes) {
         consider(Mode::Delta2, code_residuals(&lin2_res), &mut best_mode, &mut best_payload);
+
+        // DELTA_DP: exact float residual of the same predictor. Wins big on
+        // polynomial/smooth data (constant second difference); self-bails via
+        // `None` when float subtraction isn't exactly invertible.
+        if let Some(dp_res) = linear::dp_encode(block) {
+            consider(Mode::DeltaDp, code_residuals(&dp_res), &mut best_mode, &mut best_payload);
+        }
     }
 
     // Second-order integer delta: wins on monotone/polynomial data (ramps,
