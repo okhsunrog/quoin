@@ -1,0 +1,23 @@
+[package]
+name = "fp-compressor"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless compressor for streams of IEEE-754 f64 — Rust port of the `fc` floating-point compressor"
+license = "Apache-2.0"
+repository = "https://github.com/okhsunrog/fp-compressor-rs"
+readme = "README.md"
+keywords = ["compression", "floating-point", "simd", "lossless", "time-series"]
+categories = ["compression"]
+
+[dependencies]
+# Runtime CPU-feature dispatch / function multiversioning for the hot kernels.
+# Avoids the per-call overhead of `is_x86_feature_detected!` and generates
+# baseline / AVX2 / AVX-512 clones from a single attribute.
+multiversion = "0.8.0"
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
