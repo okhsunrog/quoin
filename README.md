@@ -1,4 +1,4 @@
-# fp-compressor
+# quoin
 
 A lossless compressor for streams of IEEE-754 `f64`, in safe Rust. This is a
 from-scratch port of the [`fc`](https://github.com/xtellect/fc) floating-point
@@ -24,7 +24,7 @@ Run `cargo run --release --example compare --features bench-zstd,bench-fc`
 Kernel-level micro-benchmarks live in `benches/kernels.rs` (`cargo bench`).
 
 ```rust
-use fp_compressor::{compress, decompress, Config};
+use quoin::{compress, decompress, Config};
 
 let data: Vec<f64> = (0..10_000).map(|i| i as f64 * 0.5).collect();
 let packed = compress(&data, Config::default());

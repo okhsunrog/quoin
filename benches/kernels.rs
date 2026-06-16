@@ -9,8 +9,8 @@
 //! Compare scalar vs AVX2 codegen: `RUSTFLAGS="-C target-cpu=native" cargo bench`
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use fp_compressor::bench_internals as bi;
-use fp_compressor::{Config, compress, decompress};
+use quoin::bench_internals as bi;
+use quoin::{Config, compress, decompress};
 use std::hint::black_box;
 
 const N: usize = 1 << 16; // 64Ki values = 512 KiB per input

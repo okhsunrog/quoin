@@ -1,10 +1,10 @@
 [package]
-name = "fp-compressor"
+name = "quoin"
 version = "0.1.0"
 edition = "2024"
 description = "Lossless compressor for streams of IEEE-754 f64 — Rust port of the `fc` floating-point compressor"
 license = "Apache-2.0"
-repository = "https://github.com/okhsunrog/fp-compressor-rs"
+repository = "https://github.com/okhsunrog/quoin"
 readme = "README.md"
 keywords = ["compression", "floating-point", "simd", "lossless", "time-series"]
 categories = ["compression"]

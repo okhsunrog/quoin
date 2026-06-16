@@ -1,4 +1,4 @@
-//! `fp-compressor` — a lossless compressor for streams of IEEE-754 `f64`.
+//! `quoin` — a lossless compressor for streams of IEEE-754 `f64`.
 //!
 //! This is a from-scratch Rust port of the `fc` floating-point compressor
 //! (Apache-2.0, © Praveen Vaddadi). The original is a single ~6k-line C file
@@ -17,8 +17,8 @@
 //! # Example
 //! ```
 //! let data: Vec<f64> = (0..10_000).map(|i| (i as f64) * 0.5).collect();
-//! let packed = fp_compressor::compress(&data, fp_compressor::Config::default());
-//! let restored = fp_compressor::decompress(&packed).unwrap();
+//! let packed = quoin::compress(&data, quoin::Config::default());
+//! let restored = quoin::decompress(&packed).unwrap();
 //! assert_eq!(data, restored);
 //! ```
 
@@ -39,7 +39,7 @@ pub use error::Error;
 pub use mode::{Mode, mode_name};
 
 /// Version string, mirroring the original `fc_ver`.
-pub const VERSION: &str = concat!("fp-compressor ", env!("CARGO_PKG_VERSION"));
+pub const VERSION: &str = concat!("quoin ", env!("CARGO_PKG_VERSION"));
 
 /// Encoder configuration.
 #[derive(Clone, Copy, Debug)]

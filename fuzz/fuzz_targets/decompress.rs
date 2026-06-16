@@ -4,5 +4,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = fp_compressor::decompress(data);
+    let _ = quoin::decompress(data);
 });

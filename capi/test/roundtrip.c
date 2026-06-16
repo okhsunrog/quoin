@@ -1,25 +1,25 @@
 /* End-to-end C ABI test: compress -> decompress -> verify bit-exact.
  * Build/run via capi/test/run.sh. */
-#include "fp_compressor.h"
+#include "quoin.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static int check_roundtrip(const char *name, const double *data, size_t n,
-                           const FpCtx *ctx) {
-    size_t cap = fp_compress_bound(n);
+                           const QuoinCtx *ctx) {
+    size_t cap = quoin_compress_bound(n);
     uint8_t *packed = malloc(cap);
     size_t clen = 0;
-    int rc = ctx ? fp_compress_ctx(ctx, data, n, packed, cap, &clen)
-                 : fp_compress(data, n, packed, cap, &clen);
-    if (rc != FP_OK) {
+    int rc = ctx ? quoin_compress_ctx(ctx, data, n, packed, cap, &clen)
+                 : quoin_compress(data, n, packed, cap, &clen);
+    if (rc != QUOIN_OK) {
         printf("  %-12s FAIL compress rc=%d\n", name, rc);
         free(packed);
         return 1;
     }
 
-    ptrdiff_t want = fp_decompressed_value_count(packed, clen);
+    ptrdiff_t want = quoin_decompressed_value_count(packed, clen);
     if (want != (ptrdiff_t)n) {
         printf("  %-12s FAIL value_count %td != %zu\n", name, want, n);
         free(packed);
@@ -28,10 +28,10 @@ static int check_roundtrip(const char *name, const double *data, size_t n,
 
     double *out = malloc(n * sizeof(double) + 8);
     size_t got = 0;
-    rc = ctx ? fp_decompress_ctx(ctx, packed, clen, out, n, &got)
-             : fp_decompress(packed, clen, out, n, &got);
+    rc = ctx ? quoin_decompress_ctx(ctx, packed, clen, out, n, &got)
+             : quoin_decompress(packed, clen, out, n, &got);
     free(packed);
-    if (rc != FP_OK || got != n) {
+    if (rc != QUOIN_OK || got != n) {
         printf("  %-12s FAIL decompress rc=%d got=%zu\n", name, rc, got);
         free(out);
         return 1;
@@ -47,7 +47,7 @@ static int check_roundtrip(const char *name, const double *data, size_t n,
 }
 
 int main(void) {
-    printf("fp_compressor C ABI test: %s\n", fp_version());
+    printf("quoin C ABI test: %s\n", quoin_version());
     const size_t N = 100000;
     double *ramp = malloc(N * sizeof(double));
     double *cents = malloc(N * sizeof(double));
@@ -70,21 +70,21 @@ int main(void) {
     fails += check_roundtrip("special", special, 8, NULL);
     fails += check_roundtrip("empty", ramp, 0, NULL);
 
-    FpCtx *ctx = fp_ctx_create(4);
+    QuoinCtx *ctx = quoin_ctx_create(4);
     printf("context pool (4 threads):\n");
     fails += check_roundtrip("ramp", ramp, N, ctx);
     fails += check_roundtrip("cents", cents, N, ctx);
-    fp_ctx_free(ctx);
+    quoin_ctx_free(ctx);
 
     /* Error path: corrupt input must not crash, must report an error. */
     uint8_t junk[32];
     memset(junk, 0xAB, sizeof junk);
     double tmp[4];
     size_t got = 0;
-    int rc = fp_decompress(junk, sizeof junk, tmp, 4, &got);
-    printf("corrupt input -> rc=%d (expect %d)%s\n", rc, FP_ERR_CORRUPT,
-           rc == FP_ERR_CORRUPT ? "  ok" : "  FAIL");
-    if (rc != FP_ERR_CORRUPT) fails++;
+    int rc = quoin_decompress(junk, sizeof junk, tmp, 4, &got);
+    printf("corrupt input -> rc=%d (expect %d)%s\n", rc, QUOIN_ERR_CORRUPT,
+           rc == QUOIN_ERR_CORRUPT ? "  ok" : "  FAIL");
+    if (rc != QUOIN_ERR_CORRUPT) fails++;
 
     free(ramp); free(cents); free(sine); free(special);
     printf(fails ? "\nFAILED (%d)\n" : "\nAll C ABI tests passed.\n", fails);

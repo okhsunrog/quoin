@@ -1,8 +1,8 @@
 [package]
-name = "fp-compressor-capi"
+name = "quoin-capi"
 version = "0.1.0"
 edition = "2024"
-description = "C ABI for the fp-compressor floating-point compressor"
+description = "C ABI for the quoin floating-point compressor"
 license = "Apache-2.0"
 publish = false
 
@@ -13,5 +13,5 @@ publish = false
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-fp-compressor = { path = "..", features = ["parallel"] }
+quoin = { path = "..", features = ["parallel"] }
 rayon = "1.12"

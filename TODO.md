@@ -7,14 +7,14 @@ design decisions reached in discussion so the context isn't lost.
 
 Implemented as a standalone `capi/` crate (`cdylib` + `staticlib`, path-depends
 on the parent like `fuzz/`, so the Rust dev loop stays rlib-only). Header at
-`capi/include/fp_compressor.h`; C round-trip test at `capi/test/` (run
+`capi/include/quoin.h`; C round-trip test at `capi/test/` (run
 `capi/test/run.sh`). Build the C library with
 `cargo build --release --manifest-path capi/Cargo.toml`.
 
-What shipped: `fp_compress`/`fp_decompress` (global pool), `fp_compress_ctx`/
-`fp_decompress_ctx` + `fp_ctx_create`/`fp_ctx_free` (opaque context owning a
-persistent pool), `fp_compress_bound`, `fp_decompressed_value_count`,
-`fp_version`. Every entry point `catch_unwind`s; errors are codes; caller sizes
+What shipped: `quoin_compress`/`quoin_decompress` (global pool), `quoin_compress_ctx`/
+`quoin_decompress_ctx` + `quoin_ctx_create`/`quoin_ctx_free` (opaque context owning a
+persistent pool), `quoin_compress_bound`, `quoin_decompressed_value_count`,
+`quoin_version`. Every entry point `catch_unwind`s; errors are codes; caller sizes
 the buffers. The threading-design rationale and FFI footguns below are realized
 in that code (fork caveat documented in the header).
 
@@ -22,7 +22,7 @@ in that code (fork caveat documented in the header).
 
 - **Default global pool is C-friendly.** `Config { threads: None }` runs on
   rayon's process-global pool (lazily created once, lives for the process), so
-  a context-free `fp_compress()` gets zero per-call thread churn — same as a
+  a context-free `quoin_compress()` gets zero per-call thread churn — same as a
   Rust caller.
 - **The Rust escape hatch doesn't cross FFI.** "Build your own `ThreadPool` and
   wrap calls in `pool.install()`" is Rust-only. A C caller who wants *bounded*
@@ -30,11 +30,11 @@ in that code (fork caveat documented in the header).
   **every call** — real churn for high-frequency/small-input use.
 - **Fix: opaque context handle owning a persistent pool** (like `ZSTD_CCtx`):
   ```c
-  fp_ctx* ctx = fp_ctx_create(/*threads=*/8); // builds & holds one ThreadPool
-  fp_compress_ctx(ctx, src, len, dst, cap);    // runs in ctx.pool.install(...)
-  fp_ctx_free(ctx);                            // deterministic thread teardown
+  quoin_ctx* ctx = quoin_ctx_create(/*threads=*/8); // builds & holds one ThreadPool
+  quoin_compress_ctx(ctx, src, len, dst, cap);    // runs in ctx.pool.install(...)
+  quoin_ctx_free(ctx);                            // deterministic thread teardown
   ```
-  Also expose a context-free `fp_compress()` that uses the global pool for
+  Also expose a context-free `quoin_compress()` that uses the global pool for
   convenience. Avoid making a one-shot `build_global()` init the *only* option
   (it's process-wide, one-shot, clobbers the host's rayon config).
 
@@ -48,12 +48,12 @@ in that code (fork caveat documented in the header).
       the caveat; the context handle lets the host control when threads exist.
 - [ ] **Thread lifetime vs teardown** — global-pool threads persist; `dlclose`
       while they're alive is unsafe. Context handle gives deterministic
-      teardown via `fp_ctx_free`.
+      teardown via `quoin_ctx_free`.
 
 ### API surface
 
-- [ ] `extern "C"` wrappers: `fp_compress` / `fp_decompress` (global pool),
-      `fp_ctx_create(threads)` / `fp_compress_ctx` / `fp_ctx_free`.
+- [ ] `extern "C"` wrappers: `quoin_compress` / `quoin_decompress` (global pool),
+      `quoin_ctx_create(threads)` / `quoin_compress_ctx` / `quoin_ctx_free`.
 - [ ] Error codes (no panics, no `Result` across the boundary); map
       [`Error`](src/error.rs) variants to integers.
 - [ ] Caller-sized output buffers + a `comp_bound`-style sizing helper.

@@ -20,7 +20,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::BadMagic => write!(f, "bad magic: not an fp-compressor stream"),
+            Error::BadMagic => write!(f, "bad magic: not an quoin stream"),
             Error::UnsupportedVersion(v) => write!(f, "unsupported format version {v}"),
             Error::Truncated => write!(f, "truncated stream"),
             Error::UnknownMode(m) => write!(f, "unknown block mode {m}"),

@@ -3,7 +3,7 @@
 //! buffers and with bit-flipped / truncated valid streams (which reach deep
 //! into the codecs because they keep a valid header).
 
-use fp_compressor::{Config, compress, decompress};
+use quoin::{Config, compress, decompress};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn lcg(s: &mut u64) -> u64 {

@@ -14,7 +14,7 @@
 
 use std::time::Instant;
 
-use fp_compressor::{Config, compress, decompress};
+use quoin::{Config, compress, decompress};
 
 // ---------------------------------------------------------------------------
 // Synthetic datasets, ported 1:1 from fc/test_fc.c so results are comparable.
@@ -209,7 +209,7 @@ fn top_modes(counts: &[u64; 64]) -> String {
     v.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
     v.iter()
         .take(3)
-        .map(|(m, c)| format!("{}×{}", fp_compressor::mode_name(*m as u8), c))
+        .map(|(m, c)| format!("{}×{}", quoin::mode_name(*m as u8), c))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -236,12 +236,12 @@ fn mbps(orig_bytes: usize, secs: f64) -> f64 {
 fn bench_ours(data: &[f64], trials: usize) -> Row {
     let orig = data.len() * 8;
     let mut packed = Vec::new();
-    fp_compressor::reset_mode_win_counts();
+    quoin::reset_mode_win_counts();
     let (enc_s, _) = time_median(trials, || {
         packed = compress(data, Config::default());
         packed.len()
     });
-    let modes = top_modes(&fp_compressor::mode_win_counts());
+    let modes = top_modes(&quoin::mode_win_counts());
     let (dec_s, restored) = time_median(trials, || decompress(&packed).expect("decode"));
     Row {
         comp: packed.len(),
@@ -352,7 +352,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
-    println!("{}", fp_compressor::VERSION);
+    println!("{}", quoin::VERSION);
     println!(
         "datasets: {} x {n} values ({} MiB each), median of {trials}\n",
         DATASETS.len(),

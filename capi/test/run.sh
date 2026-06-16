@@ -9,7 +9,7 @@ cargo build --release --manifest-path Cargo.toml >&2
 # stops at the first match without a pipe (avoids SIGPIPE under pipefail).
 SEARCH_DIRS=(. /home/okhsunrog/tmp_zfs/rust_build)
 [ -n "${CARGO_TARGET_DIR:-}" ] && SEARCH_DIRS+=("$CARGO_TARGET_DIR")
-LIB=$(find "${SEARCH_DIRS[@]}" -name 'libfp_compressor_capi.a' -print -quit 2>/dev/null)
+LIB=$(find "${SEARCH_DIRS[@]}" -name 'libquoin_capi.a' -print -quit 2>/dev/null)
 [ -n "$LIB" ] || { echo "static lib not found" >&2; exit 1; }
 echo "linking against $LIB" >&2
 

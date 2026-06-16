@@ -7,8 +7,8 @@ fuzz_target!(|data: &[u8]| {
     let vals: Vec<f64> =
         data.chunks_exact(8).map(|c| f64::from_bits(u64::from_le_bytes(c.try_into().unwrap()))).collect();
 
-    let packed = fp_compressor::compress(&vals, fp_compressor::Config::default());
-    let back = fp_compressor::decompress(&packed).expect("our own stream must decode");
+    let packed = quoin::compress(&vals, quoin::Config::default());
+    let back = quoin::decompress(&packed).expect("our own stream must decode");
 
     assert_eq!(vals.len(), back.len(), "length changed across round trip");
     for (i, (a, b)) in vals.iter().zip(&back).enumerate() {

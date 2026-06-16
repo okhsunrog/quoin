@@ -1,7 +1,7 @@
 //! End-to-end round-trip and ratio checks across synthetic datasets, mirroring
 //! the spirit of the original `fc` test harness.
 
-use fp_compressor::{Config, compress, decompress};
+use quoin::{Config, compress, decompress};
 
 fn assert_roundtrip(name: &str, data: &[f64]) -> f64 {
     let packed = compress(data, Config::default());

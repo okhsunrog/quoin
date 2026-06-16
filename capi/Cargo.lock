@@ -50,23 +50,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "fp-compressor"
-version = "0.1.0"
-dependencies = [
- "cc",
- "multiversion",
- "rayon",
-]
-
-[[package]]
-name = "fp-compressor-capi"
-version = "0.1.0"
-dependencies = [
- "fp-compressor",
- "rayon",
-]
-
-[[package]]
 name = "multiversion"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -95,6 +78,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quoin"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "multiversion",
+ "rayon",
+]
+
+[[package]]
+name = "quoin-capi"
+version = "0.1.0"
+dependencies = [
+ "quoin",
+ "rayon",
 ]
 
 [[package]]
