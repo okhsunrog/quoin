@@ -23,12 +23,12 @@ pub(crate) const VERSION: u8 = 1;
 pub(crate) const HEADER_LEN: usize = 16;
 pub(crate) const FRAME_HEADER_LEN: usize = 9;
 
-/// Maximum values a single block may declare. The encoder never emits more than
-/// one quantum per block, so the decoder rejects anything larger — this bounds
-/// per-block allocation and stops a tiny `CONST`/`STRIDE` frame from claiming a
-/// huge value count (a decompression bomb). Bump alongside the encoder quantum
-/// if adaptive block growth is added.
-pub(crate) const MAX_BLOCK_VALUES: usize = 32 * 1024;
+/// Maximum values a single block may declare. The encoder grows low-entropy
+/// blocks up to this (adaptive sizing), so the decoder rejects anything larger —
+/// this bounds per-block allocation and stops a tiny `CONST`/`STRIDE` frame from
+/// claiming a huge value count (a decompression bomb). 128 Ki * 8 B = 1 MiB,
+/// matching `fc`'s max quantum.
+pub(crate) const MAX_BLOCK_VALUES: usize = 128 * 1024;
 
 pub(crate) struct Header {
     pub predictor_log2: u8,

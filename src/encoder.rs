@@ -12,9 +12,34 @@ use crate::entropy::code_residuals;
 use crate::format::{FRAME_HEADER_LEN, Header};
 use crate::mode::Mode;
 
-/// Values per block. 32768 * 8 B = 256 KiB, matching `fc`'s default quantum.
-/// Must not exceed the decoder's `MAX_BLOCK_VALUES`, which is defined as this.
-const QUANTUM_VALUES: usize = crate::format::MAX_BLOCK_VALUES;
+/// Default block: 32768 * 8 B = 256 KiB, matching `fc`'s base quantum. Kept
+/// small so noisy/incompressible data parallelizes well.
+const BASE_QUANTUM: usize = 32 * 1024;
+/// Grown block for low-entropy data: 128 Ki * 8 B = 1 MiB (== `MAX_BLOCK_VALUES`).
+/// Bigger blocks give LZ a larger window and entropy models more data to adapt,
+/// at no parallelism cost since such blocks compress to almost nothing.
+const MAX_QUANTUM: usize = crate::format::MAX_BLOCK_VALUES;
+
+/// Plan block boundaries: probe each base-quantum region and grow it to
+/// `MAX_QUANTUM` when it looks low-entropy (dictionary / constant / run-heavy),
+/// otherwise keep it at `BASE_QUANTUM`.
+fn plan_blocks(vals: &[u64]) -> Vec<(usize, usize)> {
+    let n = vals.len();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < n {
+        let base_end = (start + BASE_QUANTUM).min(n);
+        let feats = probe_block_features(&vals[start..base_end]);
+        let end = if feats.distinct_low || feats.looks_like_repeats {
+            (start + MAX_QUANTUM).min(n)
+        } else {
+            base_end
+        };
+        ranges.push((start, end));
+        start = end;
+    }
+    ranges
+}
 
 pub(crate) fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
     let predictor_log2 = cfg.clamped_predictor_log2();
@@ -38,9 +63,11 @@ pub(crate) fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
 #[cfg(feature = "parallel")]
 fn build_frames(vals: &[u64], predictor_log2: u8, threads: Option<usize>) -> Vec<Vec<u8>> {
     use rayon::prelude::*;
+    let ranges = plan_blocks(vals);
     let run = || {
-        vals.par_chunks(QUANTUM_VALUES)
-            .map(|block| encode_block(block, predictor_log2))
+        ranges
+            .par_iter()
+            .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2))
             .collect::<Vec<_>>()
     };
     match threads {
@@ -54,8 +81,9 @@ fn build_frames(vals: &[u64], predictor_log2: u8, threads: Option<usize>) -> Vec
 
 #[cfg(not(feature = "parallel"))]
 fn build_frames(vals: &[u64], predictor_log2: u8, _threads: Option<usize>) -> Vec<Vec<u8>> {
-    vals.chunks(QUANTUM_VALUES)
-        .map(|block| encode_block(block, predictor_log2))
+    plan_blocks(vals)
+        .iter()
+        .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2))
         .collect()
 }
 

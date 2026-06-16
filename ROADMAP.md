@@ -35,11 +35,10 @@ the throughput tax that every additional mode otherwise imposes.
 
 **Tier 1 — biggest gaps; do in order:**
 
-1. [ ] **Feature-based mode gating** *(speed — our weakest axis; enabler).*
-   Compute cheap block stats once (`exp_range`, `sign_flips`, `distinct`,
-   `looks_like_repeats`) and only try the matching mode families. Targets the
-   3–4× encode gap vs `fc` on noisy data and makes adding modes free of a
-   throughput tax. **Verify per-dataset ratio holds (diagnostics) after.**
+1. [x] **Feature-based mode gating** — done. `probe_block_features`
+   (`exp_range`, sampled `distinct`, repeat detection) gates LZ and
+   byte-transpose. **Encode 2.5–4.8× faster, ratio unchanged (3.00×)**, winners
+   verified identical. Room to extend gating to more families later.
 2. [ ] **Adaptive block sizing** (256 KiB→1 MiB on low-entropy blocks).
    Decoder already handles variable `n`; encoder-only. Measured: constant /
    decimal / dict / quantized up 2–4×. Keep noisy blocks small for parallelism.
