@@ -84,6 +84,13 @@ pub fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
     decoder::decompress(src)
 }
 
+/// The number of `f64` values a stream will decode to, read cheaply from its
+/// header without decompressing. Lets a caller size the output buffer up front.
+pub fn decompressed_len(src: &[u8]) -> Result<usize, Error> {
+    let header = format::Header::read(src)?;
+    usize::try_from(header.n_values).map_err(|_| Error::Truncated)
+}
+
 /// Per-mode win counts since the last [`reset_mode_win_counts`], indexed by
 /// mode ID (see [`mode_name`]). Counts how many blocks each mode won the
 /// encoder competition for — diagnostics only. Updated atomically across the

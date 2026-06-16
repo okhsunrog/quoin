@@ -1,0 +1,17 @@
+[package]
+name = "fp-compressor-capi"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI for the fp-compressor floating-point compressor"
+license = "Apache-2.0"
+publish = false
+
+# Standalone crate (like fuzz/): not a workspace member, so the parent's Rust
+# dev loop stays rlib-only. Build the C library with:
+#   cargo build --release --manifest-path capi/Cargo.toml
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+fp-compressor = { path = "..", features = ["parallel"] }
+rayon = "1.12"

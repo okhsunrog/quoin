@@ -60,7 +60,8 @@ the throughput tax that every additional mode otherwise imposes.
 8. [ ] Real SIMD (AVX2-gather predictor, explicit-SIMD transpose) — **hold**:
    gather feeds FCM which wins nothing here; transpose isn't the bottleneck.
 9. [ ] Remaining `fc` modes (BWT, PAQ, ELF, PRED variants) — long-tail.
-10. [ ] ARM/NEON path; C ABI (scoped in `TODO.md`); bitplane mode.
+10. [~] **C ABI** — done (`capi/` crate; cdylib+staticlib, context handle,
+    catch_unwind, C round-trip test). ARM/NEON path and bitplane mode remain.
 
 ## Building blocks to port next
 

@@ -3,11 +3,20 @@
 Scoped work items not yet on the main [ROADMAP](ROADMAP.md). These capture
 design decisions reached in discussion so the context isn't lost.
 
-## C ABI / FFI layer
+## C ABI / FFI layer — DONE (see `capi/`)
 
-Add a C-callable API (new `cdylib` + `staticlib` crate-type and a thin
-`extern "C"` layer) so the compressor can be consumed from C/C++/etc. The
-threading model needs care at the boundary — notes below.
+Implemented as a standalone `capi/` crate (`cdylib` + `staticlib`, path-depends
+on the parent like `fuzz/`, so the Rust dev loop stays rlib-only). Header at
+`capi/include/fp_compressor.h`; C round-trip test at `capi/test/` (run
+`capi/test/run.sh`). Build the C library with
+`cargo build --release --manifest-path capi/Cargo.toml`.
+
+What shipped: `fp_compress`/`fp_decompress` (global pool), `fp_compress_ctx`/
+`fp_decompress_ctx` + `fp_ctx_create`/`fp_ctx_free` (opaque context owning a
+persistent pool), `fp_compress_bound`, `fp_decompressed_value_count`,
+`fp_version`. Every entry point `catch_unwind`s; errors are codes; caller sizes
+the buffers. The threading-design rationale and FFI footguns below are realized
+in that code (fork caveat documented in the header).
 
 ### Threading across the C boundary
 
