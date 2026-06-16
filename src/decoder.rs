@@ -4,7 +4,7 @@
 //! is self-contained.
 
 use crate::codecs::{
-    const_block, float_mult, for_bitpack, linear, lz, pred, raw, stride, transpose, xorz,
+    alp, const_block, float_mult, for_bitpack, linear, lz, pred, raw, stride, transpose, xorz,
 };
 use crate::entropy::decode_residuals;
 use crate::error::Error;
@@ -138,5 +138,6 @@ fn decode_frame(f: &Frame<'_>, predictor_log2: u8) -> Result<Vec<u64>, Error> {
             float_mult::decode(&resid, n)?
         }
         Mode::ForBitpack => for_bitpack::decode(payload, n)?,
+        Mode::Alp => alp::decode(payload, n)?,
     })
 }

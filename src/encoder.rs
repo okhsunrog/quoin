@@ -8,7 +8,7 @@
 //! across a rayon pool.
 
 use crate::codecs::{
-    const_block, float_mult, for_bitpack, linear, lz, pred, raw, stride, transpose, xorz,
+    alp, const_block, float_mult, for_bitpack, linear, lz, pred, raw, stride, transpose, xorz,
 };
 use crate::entropy::code_residuals;
 use crate::format::{FRAME_HEADER_LEN, Header};
@@ -198,15 +198,20 @@ fn encode_block_full(block: &[u64], predictor_log2: u8) -> Vec<u8> {
 
     let block_compressible = looks_compressible(best_payload.len(), raw_bytes);
 
-    // FLOAT_MULT: fixed-decimal data (cent-rounded prices, k/100). Self-bails
-    // cheaply (fails at the first value when no decimal scale fits).
-    if block_compressible && let Some(fm_res) = float_mult::encode(block) {
+    // FLOAT_MULT / ALP compress via decimal *value*, not predictability, so they
+    // are tried regardless of `block_compressible` (random decimals defeat the
+    // predictors but pack fine as scaled integers). Both self-bail cheaply on
+    // non-decimal data.
+    if let Some(fm_res) = float_mult::encode(block) {
         consider(
             Mode::FloatMult,
             code_residuals(&fm_res),
             &mut best_mode,
             &mut best_payload,
         );
+    }
+    if let Some(p) = alp::encode(block) {
+        consider(Mode::Alp, p, &mut best_mode, &mut best_payload);
     }
 
     // LZ: only worth its match finder + entropy pass on low-distinct or
@@ -262,7 +267,7 @@ fn encode_block_full(block: &[u64], predictor_log2: u8) -> Vec<u8> {
 /// Modes ranked by sample estimate. CONST/STRIDE/RAW (global structure) and LZ
 /// (long-range repeats) are handled on the full block instead — a non-contiguous
 /// sample can't see that structure. The rest estimate well on a sample.
-const SAMPLE_MODES: [Mode; 10] = [
+const SAMPLE_MODES: [Mode; 11] = [
     Mode::Xorz,
     Mode::Pred,
     Mode::PredRc,
@@ -273,6 +278,7 @@ const SAMPLE_MODES: [Mode; 10] = [
     Mode::FloatMult,
     Mode::ByteTranspose,
     Mode::ForBitpack,
+    Mode::Alp,
 ];
 
 const SAMPLE_RUNS: usize = 8;
@@ -317,6 +323,7 @@ fn encode_mode(mode: Mode, block: &[u64], predictor_log2: u8) -> Option<Vec<u8>>
         Mode::Lz => Some(code_residuals(&lz::encode(block))),
         Mode::ByteTranspose => Some(code_residuals(&transpose::encode(block))),
         Mode::ForBitpack => Some(for_bitpack::encode(block)),
+        Mode::Alp => alp::encode(block),
     }
 }
 

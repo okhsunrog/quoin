@@ -36,6 +36,9 @@ pub enum Mode {
     PredRc = 29,
     /// Frame-of-reference + FastLanes bit-packing over 1024-value sub-blocks.
     ForBitpack = 50,
+    /// ALP: scaled-integer encoding of decimal-like doubles (FoR+bitpack digits
+    /// + exceptions).
+    Alp = 9,
 }
 
 impl Mode {
@@ -59,6 +62,7 @@ impl Mode {
             45 => Mode::DeltaDp,
             29 => Mode::PredRc,
             50 => Mode::ForBitpack,
+            9 => Mode::Alp,
             other => return Err(Error::UnknownMode(other)),
         })
     }

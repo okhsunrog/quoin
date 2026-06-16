@@ -165,6 +165,22 @@ fn g_int_narrow(n: usize) -> Vec<f64> {
         })
         .collect()
 }
+// Random cent-values with ~0.5% non-decimal outliers — FLOAT_MULT bails on a
+// single bad value, but ALP stores them as exceptions and keeps the scaled-int
+// encoding for the rest.
+fn g_decimal_outliers(n: usize) -> Vec<f64> {
+    let mut s = 0xabc_defu64;
+    (0..n)
+        .map(|_| {
+            s = lcg(&mut s);
+            if s % 200 == 0 {
+                f64::from_bits(s) // rare arbitrary outlier
+            } else {
+                (s % 100_000) as f64 / 100.0 // random 0.00..=999.99
+            }
+        })
+        .collect()
+}
 fn g_int_walk(n: usize) -> Vec<f64> {
     // slowly increasing ids with small per-row deltas.
     let mut s = 0x51edu64;
@@ -198,6 +214,7 @@ const DATASETS: &[(&str, Gen)] = &[
     ("pseudo-random", g_random),
     ("int-narrow", g_int_narrow),
     ("int-walk", g_int_walk),
+    ("decimal-outliers", g_decimal_outliers),
 ];
 
 // ---------------------------------------------------------------------------
