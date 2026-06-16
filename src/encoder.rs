@@ -245,11 +245,10 @@ fn encode_block_full(block: &[u64], predictor_log2: u8) -> Vec<u8> {
 // approach — much cheaper than encoding every mode in full.
 // ---------------------------------------------------------------------------
 
-/// Modes ranked by sample estimate. CONST/STRIDE/RAW are handled exactly on the
-/// full block instead — they detect *global* structure (all-equal, exact
-/// arithmetic sequence) that a non-contiguous sample can't see, and they're
-/// O(n) cheap.
-const SAMPLE_MODES: [Mode; 10] = [
+/// Modes ranked by sample estimate. CONST/STRIDE/RAW (global structure) and LZ
+/// (long-range repeats) are handled on the full block instead — a non-contiguous
+/// sample can't see that structure. The rest estimate well on a sample.
+const SAMPLE_MODES: [Mode; 9] = [
     Mode::Xorz,
     Mode::Pred,
     Mode::PredRc,
@@ -258,7 +257,6 @@ const SAMPLE_MODES: [Mode; 10] = [
     Mode::DeltaDp,
     Mode::OrderedDelta,
     Mode::FloatMult,
-    Mode::Lz,
     Mode::ByteTranspose,
 ];
 
@@ -307,16 +305,25 @@ fn encode_mode(mode: Mode, block: &[u64], predictor_log2: u8) -> Option<Vec<u8>>
 }
 
 fn encode_block_sampled(block: &[u64], predictor_log2: u8) -> Vec<u8> {
-    // Exact, O(n), global-structure modes — always tried on the full block.
+    let feats = probe_block_features(block);
     let mut best_mode = Mode::Raw;
     let mut best_payload = raw::encode(block);
-    for m in [Mode::Const, Mode::Stride] {
+
+    let mut consider_full = |m: Mode, best_mode: &mut Mode, best: &mut Vec<u8>| {
         if let Some(p) = encode_mode(m, block, predictor_log2)
-            && p.len() < best_payload.len()
+            && p.len() < best.len()
         {
-            best_mode = m;
-            best_payload = p;
+            *best_mode = m;
+            *best = p;
         }
+    };
+    // Exact O(n) global-structure modes — always on the full block.
+    consider_full(Mode::Const, &mut best_mode, &mut best_payload);
+    consider_full(Mode::Stride, &mut best_mode, &mut best_payload);
+    // LZ's long-range repeats are invisible to a sample, so run it on the full
+    // block when the cheap features say the data is dictionary-like.
+    if feats.distinct_low || feats.looks_like_repeats {
+        consider_full(Mode::Lz, &mut best_mode, &mut best_payload);
     }
 
     // Rank the remaining modes by their estimate on a small sample, then encode
