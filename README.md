@@ -7,13 +7,17 @@ compressor (Apache-2.0, © Praveen Vaddadi), which runs a competition between
 
 ## Status
 
-Working and competitive. The framework, stream format, mode competition,
-entropy coders (binary range coder + tANS), eleven codecs/predictors, LZ77,
-byte-transpose, and block-parallel encode/decode are in place, and the decoder
-is fuzz-hardened. On the bundled 17-dataset harness the aggregate ratio is
-**3.00×** (vs the C `fc` 3.07× and zstd-9 2.09×), with **outright ratio wins
-over both** on linear (96×), piecewise (83×), and int-x1000 (7127×). Remaining
-`fc` modes are tracked in [`ROADMAP.md`](ROADMAP.md).
+Working and competitive — at near-parity with the C `fc`. Framework, stream
+format, feature-gated adaptive-block mode competition, entropy coders (binary
+range coder + tANS), 13 codecs/predictors (incl. LZ77, byte-transpose,
+FLOAT_MULT), and block-parallel encode/decode are in place; the decoder is
+fuzz-hardened. On the bundled 17-dataset harness the aggregate ratio is
+**3.05×** (vs the C `fc` 3.07× and zstd-9 2.09×) — an **8–8 split** with `fc`
+(plus 1 tie): we win constant (55,188×, beating `fc`), linear (96×),
+piecewise (218×), int-x1000 (7,127×), decimal (487×), dict-16 (13,797×),
+quantized (3,666×), stocks (18×); `fc` edges parabolic/sin/geo and the noisy
+datasets (ar2/audio/random-walk/climate/sensor) by ~2%, near their entropy
+floor. Remaining `fc` modes are tracked in [`ROADMAP.md`](ROADMAP.md).
 
 Run `cargo run --release --example compare --features bench-zstd,bench-fc`
 (with `FC_SRC_DIR` pointing at an `fc` checkout) to reproduce the comparison.
