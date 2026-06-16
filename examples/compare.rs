@@ -173,7 +173,7 @@ fn g_decimal_outliers(n: usize) -> Vec<f64> {
     (0..n)
         .map(|_| {
             s = lcg(&mut s);
-            if s % 200 == 0 {
+            if s.is_multiple_of(200) {
                 f64::from_bits(s) // rare arbitrary outlier
             } else {
                 (s % 100_000) as f64 / 100.0 // random 0.00..=999.99

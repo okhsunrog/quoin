@@ -18,7 +18,7 @@ use crate::varint;
 const MAX_EXP: usize = 18;
 /// 1.5 · 2^52 — the round-to-nearest-int magic constant (ALP `MAGIC_NUMBER`).
 const MAGIC: f64 = 6_755_399_441_055_744.0;
-const UPPER: f64 = 9.223372036854774784e18;
+const UPPER: f64 = 9.223_372_036_854_776e18; // ~2^63, ALP's encoding limit
 
 static EXP10: [f64; MAX_EXP + 1] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
