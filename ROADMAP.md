@@ -27,6 +27,42 @@ original is one ~6,200-line C file with ~50 codecs; this tracks the port.
       ratio wins vs both on linear (96×), piecewise (83×), int-x1000 (7127×);
       DELTA_DP took parabolic 23.9→2006×.
 
+## Prioritized plan (canonical next-steps order)
+
+Goal: match/beat `fc` on ratio while being faster on encode **and** decode, in
+safe portable Rust. Sequencing matters — gating comes first because it removes
+the throughput tax that every additional mode otherwise imposes.
+
+**Tier 1 — biggest gaps; do in order:**
+
+1. [ ] **Feature-based mode gating** *(speed — our weakest axis; enabler).*
+   Compute cheap block stats once (`exp_range`, `sign_flips`, `distinct`,
+   `looks_like_repeats`) and only try the matching mode families. Targets the
+   3–4× encode gap vs `fc` on noisy data and makes adding modes free of a
+   throughput tax. **Verify per-dataset ratio holds (diagnostics) after.**
+2. [ ] **Adaptive block sizing** (256 KiB→1 MiB on low-entropy blocks).
+   Decoder already handles variable `n`; encoder-only. Measured: constant /
+   decimal / dict / quantized up 2–4×. Keep noisy blocks small for parallelism.
+3. [ ] **`FLOAT_MULT` / `INT_MULT`** — detect a common scale (k/100, k*1000),
+   store integers. Fixes our worst decisive losses: stocks (6.9 vs 15.6×),
+   decimal-cents.
+
+**Tier 2 — strong follow-ups:**
+
+4. [ ] **Prefer tANS over RC when within ~1–2%** — decode-speed win on the noisy
+   datasets (they pick the slow binary range coder; tANS decodes ~10× faster).
+5. [ ] **`ALP`** (Adaptive Lossless FP) — strong general-purpose FP codec.
+6. [ ] **`LSB_STRIP`** / smarter byte-transpose-plane entropy — close the noisy
+   long-tail (climate/sensor/ar2/random-walk, where `fc` is ~2–3% ahead).
+
+**Tier 3 — lower ROI / specialized:**
+
+7. [ ] `CONV_N` (N-tap linear predictor) for smooth/periodic (sin, audio).
+8. [ ] Real SIMD (AVX2-gather predictor, explicit-SIMD transpose) — **hold**:
+   gather feeds FCM which wins nothing here; transpose isn't the bottleneck.
+9. [ ] Remaining `fc` modes (BWT, PAQ, ELF, PRED variants) — long-tail.
+10. [ ] ARM/NEON path; C ABI (scoped in `TODO.md`); bitplane mode.
+
 ## Building blocks to port next
 
 These unlock most of the remaining modes:
