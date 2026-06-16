@@ -309,7 +309,7 @@ fn encode_block_sampled(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     let mut best_mode = Mode::Raw;
     let mut best_payload = raw::encode(block);
 
-    let mut consider_full = |m: Mode, best_mode: &mut Mode, best: &mut Vec<u8>| {
+    let consider_full = |m: Mode, best_mode: &mut Mode, best: &mut Vec<u8>| {
         if let Some(p) = encode_mode(m, block, predictor_log2)
             && p.len() < best.len()
         {
