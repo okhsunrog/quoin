@@ -1,23 +1,28 @@
 # quoin
 
-A lossless compressor for streams of IEEE-754 `f64`, in safe Rust. This is a
+A lossless, safe-Rust compressor for columns of numbers. It runs a per-block
+competition of lightweight, type-specialized codecs (predictors, deltas, LZ,
+frame-of-reference + SIMD bit-packing, ALP) and emits the smallest. Started as a
 from-scratch port of the [`fc`](https://github.com/xtellect/fc) floating-point
-compressor (Apache-2.0, © Praveen Vaddadi), which runs a competition between
-~50 specialized codecs per block and emits the smallest result.
+compressor (Apache-2.0, © Praveen Vaddadi); now evolving toward a **type-aware
+columnar codec engine** (see [`docs/LANDSCAPE.md`](docs/LANDSCAPE.md)).
 
 ## Status
 
-Working and competitive — at near-parity with the C `fc`. Framework, stream
-format, feature-gated adaptive-block mode competition, entropy coders (binary
-range coder + tANS), 13 codecs/predictors (incl. LZ77, byte-transpose,
-FLOAT_MULT), and block-parallel encode/decode are in place; the decoder is
-fuzz-hardened. On the bundled 17-dataset harness the aggregate ratio is
-**3.05×** (vs the C `fc` 3.07× and zstd-9 2.09×) — an **8–8 split** with `fc`
-(plus 1 tie): we win constant (55,188×, beating `fc`), linear (96×),
-piecewise (218×), int-x1000 (7,127×), decimal (487×), dict-16 (13,797×),
-quantized (3,666×), stocks (18×); `fc` edges parabolic/sin/geo and the noisy
-datasets (ar2/audio/random-walk/climate/sensor) by ~2%, near their entropy
-floor. Remaining `fc` modes are tracked in [`ROADMAP.md`](ROADMAP.md).
+Working and competitive. 16 codecs, adaptive block sizing, feature-gated
+competition (with an optional sampling-based selector), range-coder + tANS
+entropy stage, an autovectorizing FastLanes bit-packing substrate, block-parallel
+encode/decode, a fuzz-hardened decoder, and a **C ABI** (`capi/`).
+
+- **f64 (17-dataset harness): aggregate 3.05×** vs the C `fc` 3.07× and zstd-9
+  2.09× — an **8–8 split** with `fc` (+1 tie). Outright wins: constant 55,188×
+  (beats `fc`), linear 96×, piecewise 218×, int-x1000 7,127×, decimal 487×,
+  dict-16 13,797×, quantized 3,666×, stocks 18×.
+- **Integer/decimal columns:** FoR+bit-packing, ALP (decimals, robust to
+  outliers), and a delta→bitpack cascade — the columnar foundation.
+
+Status, results, next steps, and future ideas are tracked in
+[`ROADMAP.md`](ROADMAP.md).
 
 Run `cargo run --release --example compare --features bench-zstd,bench-fc`
 (with `FC_SRC_DIR` pointing at an `fc` checkout) to reproduce the comparison.

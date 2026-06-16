@@ -134,28 +134,24 @@ encoded form.**
 
 ## The prioritized "steal list" (drives the columnar roadmap)
 
-1. **Selection by sampling, not full-encode** *(biggest architectural fix).* Replace
-   "encode with every mode, keep smallest" with BtrBlocks/Vortex-style: estimate each
-   candidate's ratio on a ~1% stratified sample, fully encode only the winner. Cuts
-   encode cost *and* removes the per-mode throughput tax that currently caps how many
-   modes we can add.
-2. **FastLanes 1024-transposed bit-packing** as the integer substrate — small *and*
-   autovectorizing on any ISA (fixes our SIMD finding). **DONE (substrate):**
-   `src/bitpack.rs` — 1024-value lane-transposed pack/unpack, `multiversion`-
-   dispatched; verified by `objdump` to autovectorize (AVX2 clone has `ymm`, vs
-   byte-transpose's 0) at ~30 GiB/s. Not yet wired into a mode (needs FoR +
-   1024-chunking + a u64 variant); it's the building block for the integer path.
-3. **ALP + ALP-RD** for floats (faithful reimpl; retire ad-hoc FLOAT_MULT/DELTA_DP or
-   keep as fast-path).
-4. **Cascading scheme model** (depth ~3) with a unified trait + recursion (RLE splits
-   streams and recompresses each), à la BtrBlocks/Vortex — generalizes our flat mode list.
-5. **pcodec FloatMult auto-detection** (trailing-zeros + approx-GCD + snap) to upgrade
-   integer/decimal scale detection.
-6. **Integer schemes**: FoR, dictionary, RLE(+recurse), Frequency, PFOR/patching.
-7. **Compute-on-encoded kernels** (filter/take/compare) for DB pushdown — the feature
-   that makes us useful *inside* a query engine, not just a blob codec.
-8. **Nulls/validity** as a first-class compressed stream (Roaring/RLE), required for Arrow.
-9. **FSST** + dictionary for strings (later phase).
+1. ✅ **Selection by sampling** — DONE. `Config.selection = Sample` estimates each
+   mode on a stratified sample, encodes only the winner (~5–9× faster encode, ~2%
+   ratio). Optional/A/B-able.
+2. ✅ **FastLanes 1024-transposed bit-packing** — DONE. `src/bitpack.rs`,
+   autovectorizes (AVX2 `ymm` verified), ~30 GiB/s. Now wired into FOR_BITPACK /
+   DELTA_BITPACK / ALP. *(Still: u64 variant for wide columns.)*
+3. ◑ **ALP** — main scheme DONE (`FOR_BITPACK` digits + exceptions, beats
+   FLOAT_MULT on decimals-with-outliers). **ALP-RD pending** (real-doubles split).
+4. ◑ **Cascading** — STARTED: `DELTA_BITPACK` = delta→FoR+bitpack, the first
+   composed cascade. A general scheme-trait/RPN model is future.
+5. [ ] **pcodec FloatMult auto-detection** (trailing-zeros + approx-GCD + snap) to
+   upgrade our fixed-scale FLOAT_MULT.
+6. ◑ **Integer schemes**: ✅ FoR+bitpack, ✅ delta+bitpack; **pending** dictionary,
+   RLE(+recurse), Frequency, PFOR/patching.
+7. [ ] **Compute-on-encoded kernels** (filter/take/compare) for DB pushdown — the
+   feature that makes us useful *inside* a query engine, not just a blob codec.
+8. [ ] **Nulls/validity** as a first-class compressed stream (Roaring/RLE), for Arrow.
+9. [ ] **FSST** + dictionary for strings (later phase).
 
 ## Benchmark targets
 
