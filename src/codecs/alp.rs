@@ -246,7 +246,7 @@ mod tests {
 
         roundtrip(&(0..3000).map(|i| ((i % 100) as f64 * 0.25).to_bits()).collect::<Vec<_>>());
         roundtrip(&[]);
-        roundtrip(&[3.14159_f64.to_bits()]);
+        roundtrip(&[1.25_f64.to_bits()]);
         roundtrip(&vec![0.0f64.to_bits(); 2000]);
     }
 }
