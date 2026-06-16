@@ -34,6 +34,8 @@ pub enum Mode {
     DeltaDp = 45,
     /// FCM predictor residuals, range-coded (order-1 adaptive model).
     PredRc = 29,
+    /// Frame-of-reference + FastLanes bit-packing over 1024-value sub-blocks.
+    ForBitpack = 50,
 }
 
 impl Mode {
@@ -56,6 +58,7 @@ impl Mode {
             25 => Mode::Pred2,
             45 => Mode::DeltaDp,
             29 => Mode::PredRc,
+            50 => Mode::ForBitpack,
             other => return Err(Error::UnknownMode(other)),
         })
     }
@@ -113,6 +116,7 @@ pub fn mode_name(id: u8) -> &'static str {
         47 => "ELF",
         48 => "LZ_SPLIT",
         49 => "BWT_MTF_RC",
+        50 => "FOR_BITPACK", // quoin extension (fc reserves 50-63)
         _ => "?",
     }
 }

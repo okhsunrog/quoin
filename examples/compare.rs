@@ -151,6 +151,33 @@ fn g_random(n: usize) -> Vec<f64> {
     (0..n).map(|_| f64::from_bits(lcg(&mut s))).collect()
 }
 
+// Integer columns smuggled through the f64-bits API (compress() reads to_bits),
+// to exercise the integer codecs (FoR+bitpack). NOT floats — these are i64
+// columns as quoin sees them internally.
+fn g_int_narrow(n: usize) -> Vec<f64> {
+    // base + uniform 12-bit noise: bounded range, high entropy, not periodic or
+    // delta-predictable — frame-of-reference + bit-packing's niche.
+    let mut s = 0x1234_abcdu64;
+    (0..n)
+        .map(|_| {
+            s = lcg(&mut s);
+            f64::from_bits(1_000_000 + ((s >> 20) & 0xFFF))
+        })
+        .collect()
+}
+fn g_int_walk(n: usize) -> Vec<f64> {
+    // slowly increasing ids with small per-row deltas.
+    let mut s = 0x51edu64;
+    let mut v = 5_000_000u64;
+    (0..n)
+        .map(|_| {
+            s = lcg(&mut s);
+            v = v.wrapping_add(s % 16);
+            f64::from_bits(v)
+        })
+        .collect()
+}
+
 const DATASETS: &[(&str, Gen)] = &[
     ("constant", g_constant),
     ("linear", g_linear),
@@ -169,6 +196,8 @@ const DATASETS: &[(&str, Gen)] = &[
     ("stocks", g_stocks),
     ("sensor-noisy", g_sensor),
     ("pseudo-random", g_random),
+    ("int-narrow", g_int_narrow),
+    ("int-walk", g_int_walk),
 ];
 
 // ---------------------------------------------------------------------------

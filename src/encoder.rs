@@ -7,7 +7,9 @@
 //! Blocks are independent, so with the `parallel` feature they are encoded
 //! across a rayon pool.
 
-use crate::codecs::{const_block, float_mult, linear, lz, pred, raw, stride, transpose, xorz};
+use crate::codecs::{
+    const_block, float_mult, for_bitpack, linear, lz, pred, raw, stride, transpose, xorz,
+};
 use crate::entropy::code_residuals;
 use crate::format::{FRAME_HEADER_LEN, Header};
 use crate::mode::Mode;
@@ -235,6 +237,18 @@ fn encode_block_full(block: &[u64], predictor_log2: u8) -> Vec<u8> {
         );
     }
 
+    // FOR + bit-packing: the integer-column codec. Rarely wins on f64 bit
+    // patterns (not frame-of-reference-friendly) but cheap to try, and the
+    // substrate the typed-columnar path is built on.
+    if block_compressible {
+        consider(
+            Mode::ForBitpack,
+            for_bitpack::encode(block),
+            &mut best_mode,
+            &mut best_payload,
+        );
+    }
+
     crate::diag::record_win(best_mode.id());
     frame_bytes(best_mode, block.len(), &best_payload)
 }
@@ -248,7 +262,7 @@ fn encode_block_full(block: &[u64], predictor_log2: u8) -> Vec<u8> {
 /// Modes ranked by sample estimate. CONST/STRIDE/RAW (global structure) and LZ
 /// (long-range repeats) are handled on the full block instead — a non-contiguous
 /// sample can't see that structure. The rest estimate well on a sample.
-const SAMPLE_MODES: [Mode; 9] = [
+const SAMPLE_MODES: [Mode; 10] = [
     Mode::Xorz,
     Mode::Pred,
     Mode::PredRc,
@@ -258,6 +272,7 @@ const SAMPLE_MODES: [Mode; 9] = [
     Mode::OrderedDelta,
     Mode::FloatMult,
     Mode::ByteTranspose,
+    Mode::ForBitpack,
 ];
 
 const SAMPLE_RUNS: usize = 8;
@@ -301,6 +316,7 @@ fn encode_mode(mode: Mode, block: &[u64], predictor_log2: u8) -> Option<Vec<u8>>
         Mode::FloatMult => float_mult::encode(block).map(|r| code_residuals(&r)),
         Mode::Lz => Some(code_residuals(&lz::encode(block))),
         Mode::ByteTranspose => Some(code_residuals(&transpose::encode(block))),
+        Mode::ForBitpack => Some(for_bitpack::encode(block)),
     }
 }
 
