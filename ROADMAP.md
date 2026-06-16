@@ -39,17 +39,17 @@ the throughput tax that every additional mode otherwise imposes.
    (`exp_range`, sampled `distinct`, repeat detection) gates LZ and
    byte-transpose. **Encode 2.5–4.8× faster, ratio unchanged (3.00×)**, winners
    verified identical. Room to extend gating to more families later.
-2. [ ] **Adaptive block sizing** (256 KiB→1 MiB on low-entropy blocks).
-   Decoder already handles variable `n`; encoder-only. Measured: constant /
-   decimal / dict / quantized up 2–4×. Keep noisy blocks small for parallelism.
-3. [ ] **`FLOAT_MULT` / `INT_MULT`** — detect a common scale (k/100, k*1000),
-   store integers. Fixes our worst decisive losses: stocks (6.9 vs 15.6×),
-   decimal-cents.
+2. [x] **Adaptive block sizing** — done (`plan_blocks`, 256 KiB→1 MiB). constant
+   14979→55188× (beats fc), dict-16 →13797× (beats fc), decimal/quantized up.
+3. [x] **`FLOAT_MULT`** — done. stocks 7.3→18.0× (beats fc 15.6×), quantized
+   →3666× (beats fc). Aggregate **3.05×** (vs fc 3.07×). Now beat fc on 7 of 17.
 
 **Tier 2 — strong follow-ups:**
 
-4. [ ] **Prefer tANS over RC when within ~1–2%** — decode-speed win on the noisy
-   datasets (they pick the slow binary range coder; tANS decodes ~10× faster).
+4. [~] **Prefer tANS over RC when close** — investigated & deferred. No-op at
+   safe margins (RC's order-1 beats order-0 tANS by >6% on the noisy
+   byte-transpose streams); larger margins cost real ratio. Faster
+   decode-on-noisy needs a faster range decoder or order-1 tANS.
 5. [ ] **`ALP`** (Adaptive Lossless FP) — strong general-purpose FP codec.
 6. [ ] **`LSB_STRIP`** / smarter byte-transpose-plane entropy — close the noisy
    long-tail (climate/sensor/ar2/random-walk, where `fc` is ~2–3% ahead).

@@ -7,6 +7,12 @@
 //! [`code_residuals`]/[`decode_residuals`] run both on a predictor residual
 //! stream and keep the smaller, tagging the choice in a leading byte so the
 //! predictor modes don't each need two mode IDs.
+//!
+//! (A "prefer tANS within N% for faster decode" policy was tried and reverted:
+//! at safe margins it's a no-op because RC's order-1 model beats order-0 tANS
+//! by >6% on the byte-transpose streams the noisy datasets use, and larger
+//! margins cost real ratio. Faster decode on those would need a faster range
+//! decoder or an order-1 tANS — deferred.)
 
 pub(crate) mod rc;
 pub(crate) mod tans;
