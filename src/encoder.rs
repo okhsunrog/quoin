@@ -7,11 +7,11 @@
 //! Blocks are independent, so with the `parallel` feature they are encoded
 //! across a rayon pool.
 
-use crate::Config;
 use crate::codecs::{const_block, float_mult, linear, lz, pred, raw, stride, transpose, xorz};
 use crate::entropy::code_residuals;
 use crate::format::{FRAME_HEADER_LEN, Header};
 use crate::mode::Mode;
+use crate::{Config, Selection};
 
 /// Default block: 32768 * 8 B = 256 KiB, matching `fc`'s base quantum. Kept
 /// small so noisy/incompressible data parallelizes well.
@@ -46,7 +46,7 @@ pub(crate) fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
     let predictor_log2 = cfg.clamped_predictor_log2();
     let vals: Vec<u64> = src.iter().map(|f| f.to_bits()).collect();
 
-    let frames = build_frames(&vals, predictor_log2, cfg.threads);
+    let frames = build_frames(&vals, predictor_log2, cfg.threads, cfg.selection);
 
     let total: usize = frames.iter().map(Vec::len).sum();
     let mut out = Vec::with_capacity(crate::format::HEADER_LEN + total);
@@ -62,13 +62,18 @@ pub(crate) fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
 }
 
 #[cfg(feature = "parallel")]
-fn build_frames(vals: &[u64], predictor_log2: u8, threads: Option<usize>) -> Vec<Vec<u8>> {
+fn build_frames(
+    vals: &[u64],
+    predictor_log2: u8,
+    threads: Option<usize>,
+    sel: Selection,
+) -> Vec<Vec<u8>> {
     use rayon::prelude::*;
     let ranges = plan_blocks(vals);
     let run = || {
         ranges
             .par_iter()
-            .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2))
+            .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, sel))
             .collect::<Vec<_>>()
     };
     match threads {
@@ -81,14 +86,26 @@ fn build_frames(vals: &[u64], predictor_log2: u8, threads: Option<usize>) -> Vec
 }
 
 #[cfg(not(feature = "parallel"))]
-fn build_frames(vals: &[u64], predictor_log2: u8, _threads: Option<usize>) -> Vec<Vec<u8>> {
+fn build_frames(
+    vals: &[u64],
+    predictor_log2: u8,
+    _threads: Option<usize>,
+    sel: Selection,
+) -> Vec<Vec<u8>> {
     plan_blocks(vals)
         .iter()
-        .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2))
+        .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, sel))
         .collect()
 }
 
-fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
+fn encode_block(block: &[u64], predictor_log2: u8, sel: Selection) -> Vec<u8> {
+    match sel {
+        Selection::Full => encode_block_full(block, predictor_log2),
+        Selection::Sample => encode_block_sampled(block, predictor_log2),
+    }
+}
+
+fn encode_block_full(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     // RAW is the always-available baseline; every other mode must beat it.
     let mut best_mode = Mode::Raw;
     let mut best_payload = raw::encode(block);
@@ -216,6 +233,111 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
             &mut best_mode,
             &mut best_payload,
         );
+    }
+
+    crate::diag::record_win(best_mode.id());
+    frame_bytes(best_mode, block.len(), &best_payload)
+}
+
+// ---------------------------------------------------------------------------
+// Sampling-based selection (Selection::Sample): estimate every mode on a small
+// stratified sample, then encode only the winner in full. The BtrBlocks/Vortex
+// approach — much cheaper than encoding every mode in full.
+// ---------------------------------------------------------------------------
+
+/// Modes ranked by sample estimate. CONST/STRIDE/RAW are handled exactly on the
+/// full block instead — they detect *global* structure (all-equal, exact
+/// arithmetic sequence) that a non-contiguous sample can't see, and they're
+/// O(n) cheap.
+const SAMPLE_MODES: [Mode; 10] = [
+    Mode::Xorz,
+    Mode::Pred,
+    Mode::PredRc,
+    Mode::Pred2,
+    Mode::Delta2,
+    Mode::DeltaDp,
+    Mode::OrderedDelta,
+    Mode::FloatMult,
+    Mode::Lz,
+    Mode::ByteTranspose,
+];
+
+const SAMPLE_RUNS: usize = 8;
+const SAMPLE_RUN_LEN: usize = 64;
+/// Small predictor table for sample estimates — the sample is tiny, so a 1 MiB
+/// table would dominate the cost. The sample is never decoded, so the table
+/// size needn't match the full encode.
+const SAMPLE_PLOG2: u8 = 10;
+
+/// Stratified sample: `SAMPLE_RUNS` contiguous runs spread across the block, so
+/// local structure (deltas, repeats) survives within each run.
+fn build_sample(block: &[u64]) -> Vec<u64> {
+    let n = block.len();
+    let total = SAMPLE_RUNS * SAMPLE_RUN_LEN;
+    if n <= total {
+        return block.to_vec();
+    }
+    let mut s = Vec::with_capacity(total);
+    for r in 0..SAMPLE_RUNS {
+        let start = r * (n - SAMPLE_RUN_LEN) / (SAMPLE_RUNS - 1);
+        s.extend_from_slice(&block[start..start + SAMPLE_RUN_LEN]);
+    }
+    s
+}
+
+/// Produce a mode's payload for `block`, or `None` if the mode doesn't apply.
+/// Centralized encode dispatch used by the sample path (and to encode the
+/// winner in full).
+fn encode_mode(mode: Mode, block: &[u64], predictor_log2: u8) -> Option<Vec<u8>> {
+    match mode {
+        Mode::Raw => Some(raw::encode(block)),
+        Mode::Const => const_block::encode(block),
+        Mode::Stride => stride::encode(block),
+        Mode::Xorz => Some(xorz::encode(block)),
+        Mode::Pred => Some(pred::encode(block, predictor_log2)),
+        Mode::PredRc => Some(code_residuals(&pred::encode(block, predictor_log2))),
+        Mode::Pred2 => Some(code_residuals(&pred::dfcm_encode(block, predictor_log2))),
+        Mode::Delta2 => Some(code_residuals(&linear::encode(block))),
+        Mode::DeltaDp => linear::dp_encode(block).map(|r| code_residuals(&r)),
+        Mode::OrderedDelta => Some(code_residuals(&linear::idelta2_encode(block))),
+        Mode::FloatMult => float_mult::encode(block).map(|r| code_residuals(&r)),
+        Mode::Lz => Some(code_residuals(&lz::encode(block))),
+        Mode::ByteTranspose => Some(code_residuals(&transpose::encode(block))),
+    }
+}
+
+fn encode_block_sampled(block: &[u64], predictor_log2: u8) -> Vec<u8> {
+    // Exact, O(n), global-structure modes — always tried on the full block.
+    let mut best_mode = Mode::Raw;
+    let mut best_payload = raw::encode(block);
+    for m in [Mode::Const, Mode::Stride] {
+        if let Some(p) = encode_mode(m, block, predictor_log2)
+            && p.len() < best_payload.len()
+        {
+            best_mode = m;
+            best_payload = p;
+        }
+    }
+
+    // Rank the remaining modes by their estimate on a small sample, then encode
+    // only the winner in full and let it challenge the structural best.
+    let sample = build_sample(block);
+    let mut win = None;
+    let mut win_est = usize::MAX;
+    for &m in &SAMPLE_MODES {
+        if let Some(p) = encode_mode(m, &sample, SAMPLE_PLOG2)
+            && p.len() < win_est
+        {
+            win_est = p.len();
+            win = Some(m);
+        }
+    }
+    if let Some(m) = win
+        && let Some(p) = encode_mode(m, block, predictor_log2)
+        && p.len() < best_payload.len()
+    {
+        best_mode = m;
+        best_payload = p;
     }
 
     crate::diag::record_win(best_mode.id());

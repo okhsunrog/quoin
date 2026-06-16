@@ -41,6 +41,18 @@ pub use mode::{Mode, mode_name};
 /// Version string, mirroring the original `fc_ver`.
 pub const VERSION: &str = concat!("quoin ", env!("CARGO_PKG_VERSION"));
 
+/// How the encoder picks a mode for each block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Selection {
+    /// Encode every applicable mode in full and keep the smallest. Best ratio,
+    /// higher encode cost. The default.
+    Full,
+    /// Estimate each mode's size on a small stratified sample of the block, then
+    /// encode only the winner in full (the BtrBlocks/Vortex approach). Much
+    /// faster encode for a slight ratio risk. Opt-in so it can be A/B-benchmarked.
+    Sample,
+}
+
 /// Encoder configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
@@ -51,6 +63,8 @@ pub struct Config {
     /// `parallel` feature. Blocks are independent, so this scales nearly
     /// linearly.
     pub threads: Option<usize>,
+    /// Mode-selection strategy per block (see [`Selection`]).
+    pub selection: Selection,
 }
 
 impl Default for Config {
@@ -58,6 +72,7 @@ impl Default for Config {
         Config {
             predictor_log2: 16,
             threads: None,
+            selection: Selection::Full,
         }
     }
 }

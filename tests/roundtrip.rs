@@ -1,7 +1,34 @@
 //! End-to-end round-trip and ratio checks across synthetic datasets, mirroring
 //! the spirit of the original `fc` test harness.
 
-use quoin::{Config, compress, decompress};
+use quoin::{Config, Selection, compress, decompress};
+
+#[test]
+fn sample_selection_roundtrips() {
+    // Selection::Sample picks modes via a sample, but must still round-trip
+    // exactly on every shape (it's the same codecs, just a cheaper chooser).
+    let mut s = 0x9e37_79b9u64;
+    let mut lcg = || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+        s
+    };
+    let cfg = Config { selection: Selection::Sample, ..Default::default() };
+    let datasets: Vec<Vec<f64>> = vec![
+        (0..70_000).map(|i| i as f64 * 0.5).collect(),       // ramp
+        (0..70_000).map(|i| (i as f64 * 1e-4).sin()).collect(), // smooth
+        (0..70_000).map(|i| (i & 15) as f64).collect(),      // dict
+        (0..70_000).map(|i| (i % 1000) as f64 / 100.0).collect(), // decimal
+        (0..70_000).map(|_| f64::from_bits(lcg())).collect(), // random
+        vec![42.0; 70_000],                                  // const
+    ];
+    for data in datasets {
+        let packed = compress(&data, cfg);
+        let restored = decompress(&packed).expect("decode");
+        let a: Vec<u64> = data.iter().map(|f| f.to_bits()).collect();
+        let b: Vec<u64> = restored.iter().map(|f| f.to_bits()).collect();
+        assert_eq!(a, b, "sample-selection round-trip mismatch");
+    }
+}
 
 fn assert_roundtrip(name: &str, data: &[f64]) -> f64 {
     let packed = compress(data, Config::default());

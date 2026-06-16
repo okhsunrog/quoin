@@ -233,12 +233,23 @@ fn mbps(orig_bytes: usize, secs: f64) -> f64 {
 // Codecs under test
 // ---------------------------------------------------------------------------
 
+/// Encoder config, with FCBENCH_SELECT=sample switching to sampling selection
+/// so the two strategies can be A/B-benchmarked on the same datasets.
+fn our_config() -> Config {
+    let mut c = Config::default();
+    if std::env::var("FCBENCH_SELECT").as_deref() == Ok("sample") {
+        c.selection = quoin::Selection::Sample;
+    }
+    c
+}
+
 fn bench_ours(data: &[f64], trials: usize) -> Row {
     let orig = data.len() * 8;
     let mut packed = Vec::new();
+    let cfg = our_config();
     quoin::reset_mode_win_counts();
     let (enc_s, _) = time_median(trials, || {
-        packed = compress(data, Config::default());
+        packed = compress(data, cfg);
         packed.len()
     });
     let modes = top_modes(&quoin::mode_win_counts());
