@@ -77,6 +77,30 @@ fn bench_transpose(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_bitpack(c: &mut Criterion) {
+    // 1024 values needing ~11 bits (a typical FoR residual width).
+    let mut s = 1u32;
+    let mut values = [0u32; 1024];
+    for v in values.iter_mut() {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        *v = (s >> 21) & 0x7FF;
+    }
+    let width = 11u32;
+    let mut packed = vec![0u32; 32 * width as usize];
+    bi::bitpack(&values, width, &mut packed);
+    let mut out = [0u32; 1024];
+
+    let mut g = c.benchmark_group("bitpack");
+    g.throughput(Throughput::Bytes(1024 * 4));
+    g.bench_function("pack_w11", |b| {
+        b.iter(|| bi::bitpack(black_box(&values), width, black_box(&mut packed)))
+    });
+    g.bench_function("unpack_w11", |b| {
+        b.iter(|| bi::bitunpack(black_box(&packed), width, black_box(&mut out)))
+    });
+    g.finish();
+}
+
 fn bench_predictors(c: &mut Criterion) {
     let vals = smooth_bits();
     let mut g = c.benchmark_group("predictors");
@@ -114,6 +138,7 @@ criterion_group!(
     bench_hash,
     bench_entropy,
     bench_transpose,
+    bench_bitpack,
     bench_predictors,
     bench_pipeline
 );

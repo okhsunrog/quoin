@@ -23,6 +23,7 @@
 //! ```
 
 mod bitio;
+mod bitpack;
 mod codecs;
 mod decoder;
 mod diag;
@@ -162,5 +163,14 @@ pub mod bench_internals {
     /// Multiversion-dispatched byte-transpose (for tracking SIMD speed).
     pub fn byte_transpose(src: &[u8], n: usize, dst: &mut [u8]) {
         crate::transform::byte_transpose(src, n, dst);
+    }
+
+    /// FastLanes-style 1024-value bit-pack / unpack (for tracking SIMD speed).
+    pub const BITPACK_BLOCK: usize = crate::bitpack::BLOCK;
+    pub fn bitpack(values: &[u32; 1024], width: u32, out: &mut [u32]) {
+        crate::bitpack::pack(values, width, out);
+    }
+    pub fn bitunpack(packed: &[u32], width: u32, out: &mut [u32; 1024]) {
+        crate::bitpack::unpack(packed, width, out);
     }
 }

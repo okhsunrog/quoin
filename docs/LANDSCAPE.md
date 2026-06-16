@@ -140,7 +140,11 @@ encoded form.**
    encode cost *and* removes the per-mode throughput tax that currently caps how many
    modes we can add.
 2. **FastLanes 1024-transposed bit-packing** as the integer substrate — small *and*
-   autovectorizing on any ISA (fixes our SIMD finding).
+   autovectorizing on any ISA (fixes our SIMD finding). **DONE (substrate):**
+   `src/bitpack.rs` — 1024-value lane-transposed pack/unpack, `multiversion`-
+   dispatched; verified by `objdump` to autovectorize (AVX2 clone has `ymm`, vs
+   byte-transpose's 0) at ~30 GiB/s. Not yet wired into a mode (needs FoR +
+   1024-chunking + a u64 variant); it's the building block for the integer path.
 3. **ALP + ALP-RD** for floats (faithful reimpl; retire ad-hoc FLOAT_MULT/DELTA_DP or
    keep as fast-path).
 4. **Cascading scheme model** (depth ~3) with a unified trait + recursion (RLE splits
