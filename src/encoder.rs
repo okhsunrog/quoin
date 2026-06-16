@@ -1,13 +1,14 @@
 //! Block planning and the mode competition.
 //!
-//! Blocks are a fixed quantum of values (the original `fc` uses an adaptive
-//! 256 KiB–1 MiB quantum; adaptive sizing is a roadmap item). Each block is
-//! encoded by every applicable mode and the smallest output wins — the core
-//! idea that buys `fc` its ratio. Blocks are independent, so with the
-//! `parallel` feature they are encoded across a rayon pool.
+//! Blocks are adaptively sized (256 KiB base, grown to 1 MiB for low-entropy
+//! data — see [`plan_blocks`]), matching `fc`'s quantum range. Cheap per-block
+//! features ([`probe_block_features`]) then gate which mode families are worth
+//! trying; each applicable mode encodes the block and the smallest output wins.
+//! Blocks are independent, so with the `parallel` feature they are encoded
+//! across a rayon pool.
 
 use crate::Config;
-use crate::codecs::{const_block, linear, lz, pred, raw, stride, transpose, xorz};
+use crate::codecs::{const_block, float_mult, linear, lz, pred, raw, stride, transpose, xorz};
 use crate::entropy::code_residuals;
 use crate::format::{FRAME_HEADER_LEN, Header};
 use crate::mode::Mode;
@@ -177,6 +178,17 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     }
 
     let block_compressible = looks_compressible(best_payload.len(), raw_bytes);
+
+    // FLOAT_MULT: fixed-decimal data (cent-rounded prices, k/100). Self-bails
+    // cheaply (fails at the first value when no decimal scale fits).
+    if block_compressible && let Some(fm_res) = float_mult::encode(block) {
+        consider(
+            Mode::FloatMult,
+            code_residuals(&fm_res),
+            &mut best_mode,
+            &mut best_payload,
+        );
+    }
 
     // LZ: only worth its match finder + entropy pass on low-distinct or
     // repetitive data (dictionaries, quantized levels, cent-rounded prices).

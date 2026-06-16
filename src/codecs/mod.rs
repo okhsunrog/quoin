@@ -7,6 +7,7 @@
 //! residual coders (PRED_TANS, PRED_RC) and the delta/transpose transforms.
 
 pub(crate) mod const_block;
+pub(crate) mod float_mult;
 pub(crate) mod linear;
 pub(crate) mod lz;
 pub(crate) mod pred;

@@ -21,6 +21,8 @@ pub enum Mode {
     Lz = 4,
     /// Byte-plane transpose (AoS→SoA), then entropy-coded.
     ByteTranspose = 11,
+    /// Values are integer multiples of 1/scale; store the integers (verified).
+    FloatMult = 17,
     /// Second-order integer delta of bit patterns (zigzag), residuals entropy-coded.
     OrderedDelta = 7,
     /// Second-order linear extrapolation in float space, residuals entropy-coded.
@@ -48,6 +50,7 @@ impl Mode {
             4 => Mode::Lz,
             5 => Mode::Raw,
             11 => Mode::ByteTranspose,
+            17 => Mode::FloatMult,
             7 => Mode::OrderedDelta,
             20 => Mode::Delta2,
             25 => Mode::Pred2,

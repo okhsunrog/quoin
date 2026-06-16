@@ -3,7 +3,7 @@
 //! located blocks — in parallel with the `parallel` feature, since each block
 //! is self-contained.
 
-use crate::codecs::{const_block, linear, lz, pred, raw, stride, transpose, xorz};
+use crate::codecs::{const_block, float_mult, linear, lz, pred, raw, stride, transpose, xorz};
 use crate::entropy::decode_residuals;
 use crate::error::Error;
 use crate::format::{FRAME_HEADER_LEN, HEADER_LEN, Header, MAX_BLOCK_VALUES};
@@ -130,6 +130,10 @@ fn decode_frame(f: &Frame<'_>, predictor_log2: u8) -> Result<Vec<u64>, Error> {
         Mode::ByteTranspose => {
             let soa = decode_residuals(payload, n.saturating_mul(8) + 16)?;
             transpose::decode(&soa, n)?
+        }
+        Mode::FloatMult => {
+            let resid = decode_residuals(payload, n.saturating_mul(10) + 16)?;
+            float_mult::decode(&resid, n)?
         }
     })
 }
