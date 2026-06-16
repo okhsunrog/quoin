@@ -85,6 +85,7 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
     );
 
     let raw_bytes = block.len() * 8;
+    let feats = probe_block_features(block);
 
     // FCM predictor: store residuals verbatim (PRED, cheap) and, when the
     // residual stream looks compressible, also range-code them (PRED_RC).
@@ -147,10 +148,13 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
         );
     }
 
-    // LZ: catches repeating-value structure the predictors miss (dictionaries,
-    // quantized levels, cent-rounded prices). Gated on the block already showing
-    // structure, so random data skips the match finder.
-    if looks_compressible(best_payload.len(), raw_bytes) {
+    let block_compressible = looks_compressible(best_payload.len(), raw_bytes);
+
+    // LZ: only worth its match finder + entropy pass on low-distinct or
+    // repetitive data (dictionaries, quantized levels, cent-rounded prices).
+    // Skipping it on high-distinct noisy floats is where most of the encode
+    // speedup comes from — LZ finds no matches there and always loses.
+    if block_compressible && (feats.distinct_low || feats.looks_like_repeats) {
         let lz_res = lz::encode(block);
         consider(
             Mode::Lz,
@@ -158,9 +162,13 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
             &mut best_mode,
             &mut best_payload,
         );
+    }
 
-        // Byte-plane transpose: helps when a byte position is low-entropy across
-        // values (smooth floats share sign/exponent bytes).
+    // Byte-plane transpose: helps when a byte position is low-entropy across
+    // values (similar-magnitude floats share sign/exponent bytes). Skip on
+    // full-exponent-range data (random, polynomial) where it can't win and the
+    // entropy pass over the transposed block would be wasted.
+    if block_compressible && (feats.exp_range <= TRANSPOSE_EXP_LIMIT || feats.looks_like_repeats) {
         let soa = transpose::encode(block);
         consider(
             Mode::ByteTranspose,
@@ -180,6 +188,73 @@ fn encode_block(block: &[u64], predictor_log2: u8) -> Vec<u8> {
 /// where it can't help anyway.
 fn looks_compressible(residual_bytes: usize, raw_bytes: usize) -> bool {
     residual_bytes.saturating_mul(20) < raw_bytes.saturating_mul(19)
+}
+
+/// Block below this exponent-field spread is "similar magnitude" — byte
+/// transpose can find low-entropy planes. Above it (random / polynomial data
+/// spanning many exponents) the transpose can't win.
+const TRANSPOSE_EXP_LIMIT: u32 = 64;
+/// Estimated distinct-value count below which LZ / dictionary modes are worth
+/// trying.
+const DISTINCT_LOW: u32 = 2048;
+
+/// Cheap per-block features (one+ passes over the block) used to decide which
+/// expensive mode families to try, mirroring `fc`'s `exp_range` /
+/// `distinct_count` / repetition gates.
+struct BlockFeatures {
+    /// Spread of the IEEE-754 exponent field (max − min) across the block.
+    exp_range: u32,
+    /// Estimated distinct values (sampled) below [`DISTINCT_LOW`].
+    distinct_low: bool,
+    /// Most consecutive pairs are equal (run-heavy / RLE-friendly).
+    looks_like_repeats: bool,
+}
+
+fn probe_block_features(block: &[u64]) -> BlockFeatures {
+    let n = block.len();
+    if n == 0 {
+        return BlockFeatures {
+            exp_range: 0,
+            distinct_low: true,
+            looks_like_repeats: false,
+        };
+    }
+
+    let mut min_exp = u32::MAX;
+    let mut max_exp = 0u32;
+    let mut consec_eq = 0u32;
+    let mut prev = block[0];
+    for &v in block {
+        let exp = ((v >> 52) & 0x7FF) as u32;
+        min_exp = min_exp.min(exp);
+        max_exp = max_exp.max(exp);
+        consec_eq += u32::from(v == prev);
+        prev = v;
+    }
+    // `consec_eq` counts the first element against itself; harmless for the ratio.
+
+    // Distinct estimate over a sample, via a 14-bit bucket bitset (2 KiB stack).
+    let mut seen = [0u64; 256];
+    let mut distinct = 0u32;
+    let stride = (n / 4096).max(1);
+    let mut k = 0;
+    while k < n {
+        let h = block[k].wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let bucket = ((h >> 50) & 0x3FFF) as usize;
+        let word = bucket >> 6;
+        let bit = 1u64 << (bucket & 63);
+        if seen[word] & bit == 0 {
+            seen[word] |= bit;
+            distinct += 1;
+        }
+        k += stride;
+    }
+
+    BlockFeatures {
+        exp_range: max_exp - min_exp,
+        distinct_low: distinct < DISTINCT_LOW,
+        looks_like_repeats: consec_eq.saturating_mul(2) > n as u32,
+    }
 }
 
 fn frame_bytes(mode: Mode, n_values: usize, payload: &[u8]) -> Vec<u8> {
