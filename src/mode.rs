@@ -39,6 +39,8 @@ pub enum Mode {
     /// ALP: scaled-integer encoding of decimal-like doubles (FoR+bitpack digits
     /// + exceptions).
     Alp = 9,
+    /// First-order delta + FoR + bit-packing (Parquet DELTA_BINARY_PACKED).
+    DeltaBitpack = 51,
 }
 
 impl Mode {
@@ -63,6 +65,7 @@ impl Mode {
             29 => Mode::PredRc,
             50 => Mode::ForBitpack,
             9 => Mode::Alp,
+            51 => Mode::DeltaBitpack,
             other => return Err(Error::UnknownMode(other)),
         })
     }
@@ -121,6 +124,7 @@ pub fn mode_name(id: u8) -> &'static str {
         48 => "LZ_SPLIT",
         49 => "BWT_MTF_RC",
         50 => "FOR_BITPACK", // quoin extension (fc reserves 50-63)
+        51 => "DELTA_BITPACK",
         _ => "?",
     }
 }

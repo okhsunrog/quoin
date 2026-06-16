@@ -181,6 +181,19 @@ fn g_decimal_outliers(n: usize) -> Vec<f64> {
         })
         .collect()
 }
+// Monotonic timestamp column (ms): regular ~1s step + small jitter. First-order
+// delta + bit-packing's niche (Parquet DELTA_BINARY_PACKED).
+fn g_timestamps(n: usize) -> Vec<f64> {
+    let mut s = 0x7777u64;
+    let mut t = 1_700_000_000_000u64;
+    (0..n)
+        .map(|_| {
+            s = lcg(&mut s);
+            t = t.wrapping_add(1000 + (s >> 32) % 4096); // bounded but high-entropy gaps
+            f64::from_bits(t)
+        })
+        .collect()
+}
 fn g_int_walk(n: usize) -> Vec<f64> {
     // slowly increasing ids with small per-row deltas.
     let mut s = 0x51edu64;
@@ -215,6 +228,7 @@ const DATASETS: &[(&str, Gen)] = &[
     ("int-narrow", g_int_narrow),
     ("int-walk", g_int_walk),
     ("decimal-outliers", g_decimal_outliers),
+    ("timestamps", g_timestamps),
 ];
 
 // ---------------------------------------------------------------------------

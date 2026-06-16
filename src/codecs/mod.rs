@@ -8,6 +8,7 @@
 
 pub(crate) mod alp;
 pub(crate) mod const_block;
+pub(crate) mod delta_bitpack;
 pub(crate) mod float_mult;
 pub(crate) mod for_bitpack;
 pub(crate) mod linear;
