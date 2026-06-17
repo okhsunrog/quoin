@@ -19,6 +19,7 @@
 //! the boundary): `values_out` (`n * width` bytes) and an optional
 //! `validity_out` (`ceil(n/8)` bytes).
 
+use std::borrow::Cow;
 use std::os::raw::c_int;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice};
@@ -82,6 +83,19 @@ unsafe fn load<T: Copy>(ptr: *const u8, n: usize) -> Vec<T> {
     v
 }
 
+/// View `n` `T`-values: **borrow** the buffer zero-copy when it's already aligned
+/// for `T` (e.g. Arrow C Data Interface buffers, batch callers), else fall back
+/// to an owned [`load`] copy. A column store that packs values right after the
+/// validity mask hands an unaligned pointer, so it takes the copy path; aligned
+/// callers skip it.
+unsafe fn view<'a, T: Copy>(ptr: *const u8, n: usize) -> Cow<'a, [T]> {
+    if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
+        Cow::Borrowed(unsafe { slice::from_raw_parts(ptr as *const T, n) })
+    } else {
+        Cow::Owned(unsafe { load::<T>(ptr, n) })
+    }
+}
+
 unsafe fn validity_slice<'a>(validity: *const u8, n: usize) -> Option<&'a [u8]> {
     if validity.is_null() {
         None
@@ -126,7 +140,7 @@ pub unsafe extern "C" fn quoin_typed_compress(
         // then map into a wider lane (FoR re-packs it).
         macro_rules! direct {
             ($t:ty, $variant:ident) => {{
-                let v = unsafe { load::<$t>(values, n) };
+                let v = unsafe { view::<$t>(values, n) };
                 compress_column(ColumnRef::$variant(&v), valid, cfg())
             }};
         }
@@ -184,11 +198,12 @@ pub unsafe extern "C" fn quoin_typed_compress_decimal(
         let valid = unsafe { validity_slice(validity, n) };
         let packed = match dtype {
             QUOIN_DTYPE_DECIMAL128 => {
-                let v = unsafe { load::<i128>(values, n) };
+                let v = unsafe { view::<i128>(values, n) };
                 compress_column(ColumnRef::Decimal128 { values: &v, scale, precision }, valid, cfg())
             }
             QUOIN_DTYPE_DECIMAL256 => {
-                let v = unsafe { load::<[u8; 32]>(values, n) };
+                // `[u8; 32]` has alignment 1, so this borrow is always zero-copy.
+                let v = unsafe { view::<[u8; 32]>(values, n) };
                 compress_column(ColumnRef::Decimal256 { values: &v, scale, precision }, valid, cfg())
             }
             QUOIN_DTYPE_DECIMAL64 => {
