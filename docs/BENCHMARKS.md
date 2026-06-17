@@ -380,3 +380,49 @@ vortex-compact 3.09×** (the decimal columns swing it), quoin-fast 3.33× vs
 vortex-btr 2.24×, vs parquet-zstd9 3.04×. Vortex still wins the individual
 smooth-double (`sensor`) and cyclic-int (`narrow`) columns; quoin wins decimals,
 timestamps, ids, and the whole light tier.
+
+## Real-world data
+
+Beyond the synthetic shapes, two real corpora are benchmarked (datasets are
+gitignored; see the harness env vars).
+
+### ClickBench `hits` (real OLAP, web analytics)
+
+`examples/real_parquet.rs` (`--features bench-parquet`, `PARQUET_FILE=…`) feeds
+every numeric/temporal column of a real Parquet file through quoin's Arrow
+adapter vs Parquet-zstd9 (string columns skipped — no string lane yet). On
+`hits_0.parquet` (1 M rows, **77 numeric columns**: int8/16/32/64, uint16,
+timestamps):
+
+| codec | aggregate ratio | enc MB/s | dec MB/s |
+| --- | --- | --- | --- |
+| **quoin-max** | **10.48×** | 43 | 1135 |
+| parquet-zstd9 | 9.50× | 266 | 2638 |
+| quoin-fast | 6.53× | 718 | 2357 |
+
+quoin-max leads the aggregate on real OLAP data. Per-column highlights (quoin-max
+vs parquet-zstd9): `EventTime` (real timestamp) **8.38× vs 3.56×**, `ClientIP`
+9.95× vs 6.01×, `Age` 53× vs 41×, `CounterID` 19 231× vs 1 266×. quoin's CONST /
+delta / dict / FoR / pco modes beat Parquet's encodings on real integer and
+timestamp distributions.
+
+### ALP corpus (real `f64`)
+
+`examples/pareto.rs` with `ALP_DIR=datasets/alp` runs the 15-column ALP/Vortex
+`f64` benchmark corpus through the full level ladder. Aggregate:
+
+| codec | ratio | dec MB/s |
+| --- | --- | --- |
+| **quoin-max** | **3.08×** | 1043 |
+| zstd-19 | 2.86× | 474 |
+| zstd-9 | 2.63× | 567 |
+| quoin-balanced | 2.45× | 1800 |
+| lz4 | 1.65× | 940 |
+
+quoin-max beats zstd-19 on the real `f64` aggregate and decodes ~2× faster. Per
+column (quoin-max vs zstd-19): `city_temperature` 8.38× vs 6.13×, `basel_temp`
+5.80× vs 3.95×, `bird_migration` 6.03× vs 3.37×, `neon_pm10` 23.1× vs 14.5×,
+`bitcoin` 2.73× vs 1.59×. The `balanced → high` jump on each column is where the
+polynomial predictor and the pco backend turn on (at a decode-speed cost — the
+documented ladder tradeoff). The pco backend lifted this corpus from ≈2.86× to
+**3.08×**.

@@ -54,7 +54,17 @@ mod bitshuffle {
     pub fn transpose(src: &[u8], elem_bytes: usize) -> Vec<u8> {
         let n = src.len() / elem_bytes;
         let bits = elem_bytes * 8;
-        let mut out = vec![0u8; src.len()];
+        // The transposed planes are padded to a byte per 8 elements, so for an
+        // `n` that is not a multiple of 8 the last block is slightly larger than
+        // the input — size `out` to the exact transposed length, not `src.len()`.
+        let mut tlen = 0usize;
+        let mut e = 0usize;
+        while e < n {
+            let cnt = (n - e).min(BLK);
+            tlen += bits * cnt.div_ceil(8);
+            e += cnt;
+        }
+        let mut out = vec![0u8; tlen];
         let mut written = 0usize;
         let mut e0 = 0usize;
         while e0 < n {
@@ -303,6 +313,32 @@ where
     (comp, enc_s, dec_s)
 }
 
+/// Load the real-data ALP corpus: a directory of raw little-endian `f64` `.bin`
+/// columns (the ALP/Vortex benchmark format). Returns each file as an `F64`
+/// column named by its file stem. Used when `ALP_DIR` is set, so the level
+/// ladder and the pco backend are exercised on real smooth/decimal doubles
+/// rather than only synthetic shapes.
+fn alp_datasets(dir: &str) -> Vec<(String, Col)> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read ALP_DIR {dir}: {e}"))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "bin"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let name = p.file_stem().unwrap().to_string_lossy().into_owned();
+            let bytes = std::fs::read(&p).expect("read .bin");
+            let vals: Vec<f64> = bytes
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            (name, Col::F64(vals))
+        })
+        .collect()
+}
+
 fn main() {
     let n: usize = std::env::var("PARETO_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1 << 20);
     let trials: usize = std::env::var("PARETO_TRIALS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
@@ -326,7 +362,13 @@ fn main() {
 
     let mut accs: BTreeMap<&'static str, Acc> = BTreeMap::new();
 
-    for (ds, col) in datasets(n) {
+    // Real ALP f64 corpus when ALP_DIR is set, else the synthetic typed shapes.
+    let data: Vec<(String, Col)> = match std::env::var("ALP_DIR") {
+        Ok(dir) => alp_datasets(&dir),
+        Err(_) => datasets(n).into_iter().map(|(s, c)| (s.to_string(), c)).collect(),
+    };
+
+    for (ds, col) in &data {
         let raw = col.raw_bytes();
 
         for (label, level) in LEVELS {

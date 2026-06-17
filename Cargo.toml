@@ -85,5 +85,9 @@ name = "vs_columnar"
 required-features = ["bench-parquet"]
 
 [[example]]
+name = "real_parquet"
+required-features = ["bench-parquet"]
+
+[[example]]
 name = "vs_vortex"
 required-features = ["bench-vortex"]
