@@ -104,8 +104,13 @@ typedef enum {
     QUOIN_DTYPE_U32  = 7,
     QUOIN_DTYPE_U64  = 8,
     QUOIN_DTYPE_F32  = 9,
-    QUOIN_DTYPE_F64  = 10
-    /* decimals (need scale/precision) are a later increment */
+    QUOIN_DTYPE_F64  = 10,
+    /* decimals carry scale/precision; use quoin_typed_compress_decimal.
+     * significand widths: 4 / 8 / 16 / 32-byte-LE. */
+    QUOIN_DTYPE_DECIMAL32  = 11,
+    QUOIN_DTYPE_DECIMAL64  = 12,
+    QUOIN_DTYPE_DECIMAL128 = 13,
+    QUOIN_DTYPE_DECIMAL256 = 14
 } QuoinDType;
 
 /* Native width in bytes of one value of `dtype` (values-buffer stride and
@@ -120,6 +125,14 @@ size_t quoin_typed_compress_bound(int32_t dtype, size_t n);
  * panic, or the data not shrinking to fit) so the caller can store raw. */
 size_t quoin_typed_compress(int32_t dtype, size_t n, const void *values,
                             const uint8_t *validity, uint8_t *dst, size_t dst_cap);
+
+/* Compress a decimal column (DECIMAL32/64/128/256). Like quoin_typed_compress
+ * but with the column's scale/precision; `values` is the native-endian
+ * significand buffer (32/64/128-bit, or 256-bit little-endian). Decode uses the
+ * same quoin_typed_decompress (the stream self-describes scale/precision). */
+size_t quoin_typed_compress_decimal(int32_t dtype, size_t n, const void *values,
+                                    const uint8_t *validity, int8_t scale,
+                                    uint8_t precision, uint8_t *dst, size_t dst_cap);
 
 /* Decompress a quoin_typed_compress stream into caller buffers: `values_out`
  * (n * quoin_dtype_width(dtype) bytes) and optional `validity_out` (ceil(n/8)
