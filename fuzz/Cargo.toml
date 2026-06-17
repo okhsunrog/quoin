@@ -1,3 +1,7 @@
+# Empty `[workspace]` detaches this crate from the parent quoin workspace (added
+# for vendor/pco); cargo-fuzz builds it standalone.
+[workspace]
+
 [package]
 name = "quoin-fuzz"
 version = "0.0.0"

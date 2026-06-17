@@ -12,6 +12,8 @@
 //!   [`quoin_decompressed_value_count`]); we copy into them.
 #![allow(clippy::missing_safety_doc)]
 
+mod typed;
+
 use std::os::raw::{c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice};

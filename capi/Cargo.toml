@@ -9,6 +9,10 @@ publish = false
 # Standalone crate (like fuzz/): not a workspace member, so the parent's Rust
 # dev loop stays rlib-only. Build the C library with:
 #   cargo build --release --manifest-path capi/Cargo.toml
+# Empty `[workspace]` detaches this crate from the parent quoin workspace (which
+# exists only for vendor/pco); it builds standalone with its own lockfile.
+[workspace]
+
 [lib]
 crate-type = ["cdylib", "staticlib"]
 

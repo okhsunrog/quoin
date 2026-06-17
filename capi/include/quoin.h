@@ -80,6 +80,54 @@ int quoin_compress_ctx(const QuoinCtx *ctx, const double *src, size_t n_values,
 int quoin_decompress_ctx(const QuoinCtx *ctx, const uint8_t *src, size_t src_len,
                       double *dst, size_t dst_cap_values, size_t *out_values);
 
+/* ------------------------------------------------------------------------- *
+ * Typed, Arrow-native columnar API (Phase 0)
+ *
+ * Compress a typed fixed-width column given as Arrow-layout buffers:
+ *   values   - contiguous native-endian buffer of `n` values, each
+ *              quoin_dtype_width(dtype) bytes (an Arrow primitive values buffer).
+ *   validity - Arrow validity bitmap (LSB-first, 1 = valid), ceil(n/8) bytes,
+ *              or NULL for "all valid".
+ * This matches a column-store block one-for-one (no transcoding at the seam).
+ * Decode writes INTO caller-provided buffers (no allocation crosses the ABI).
+ * ------------------------------------------------------------------------- */
+
+/* Arrow-native dtype tags. */
+typedef enum {
+    QUOIN_DTYPE_BOOL = 0, /* one byte per value (0/1) */
+    QUOIN_DTYPE_I8   = 1,
+    QUOIN_DTYPE_I16  = 2,
+    QUOIN_DTYPE_I32  = 3,
+    QUOIN_DTYPE_I64  = 4,
+    QUOIN_DTYPE_U8   = 5,
+    QUOIN_DTYPE_U16  = 6,
+    QUOIN_DTYPE_U32  = 7,
+    QUOIN_DTYPE_U64  = 8,
+    QUOIN_DTYPE_F32  = 9,
+    QUOIN_DTYPE_F64  = 10
+    /* decimals (need scale/precision) are a later increment */
+} QuoinDType;
+
+/* Native width in bytes of one value of `dtype` (values-buffer stride and
+ * values_out element size). 0 for an unknown dtype. */
+size_t quoin_dtype_width(int32_t dtype);
+
+/* Upper bound on the compressed size of `n` values of `dtype`. */
+size_t quoin_typed_compress_bound(int32_t dtype, size_t n);
+
+/* Compress a typed column into `dst` (capacity `dst_cap`). Returns the
+ * compressed byte count, or 0 on any failure (unknown dtype, dst too small,
+ * panic, or the data not shrinking to fit) so the caller can store raw. */
+size_t quoin_typed_compress(int32_t dtype, size_t n, const void *values,
+                            const uint8_t *validity, uint8_t *dst, size_t dst_cap);
+
+/* Decompress a quoin_typed_compress stream into caller buffers: `values_out`
+ * (n * quoin_dtype_width(dtype) bytes) and optional `validity_out` (ceil(n/8)
+ * bytes, may be NULL). `dtype`/`n` must match the original (validated against
+ * the self-describing stream). Returns QUOIN_OK or a negative QUOIN_ERR_*. */
+int quoin_typed_decompress(int32_t dtype, size_t n, const uint8_t *src,
+                           size_t src_len, void *values_out, uint8_t *validity_out);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
