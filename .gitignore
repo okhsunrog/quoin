@@ -1,2 +1,5 @@
 /target
 /rust_build
+
+# Benchmark datasets (downloaded, not committed)
+/datasets

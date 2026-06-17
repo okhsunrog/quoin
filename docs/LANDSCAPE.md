@@ -140,14 +140,17 @@ encoded form.**
 2. ✅ **FastLanes 1024-transposed bit-packing** — DONE. `src/bitpack.rs`,
    autovectorizes (AVX2 `ymm` verified), ~30 GiB/s. Now wired into FOR_BITPACK /
    DELTA_BITPACK / ALP. *(Still: u64 variant for wide columns.)*
-3. ◑ **ALP** — main scheme DONE (`FOR_BITPACK` digits + exceptions, beats
-   FLOAT_MULT on decimals-with-outliers). **ALP-RD pending** (real-doubles split).
+3. ✅ **ALP** — main scheme (`FOR_BITPACK` digits + exceptions, beats FLOAT_MULT
+   on decimals-with-outliers) and **ALP-RD** (`alp_rd.rs`: cut-search +
+   8-entry left dictionary + exceptions, wide `right` bit-packed via the `u64`
+   kernel) — real doubles (poi coords) now compress + decode fast instead of RAW.
 4. ◑ **Cascading** — STARTED: `DELTA_BITPACK` = delta→FoR+bitpack, the first
    composed cascade. A general scheme-trait/RPN model is future.
 5. [ ] **pcodec FloatMult auto-detection** (trailing-zeros + approx-GCD + snap) to
    upgrade our fixed-scale FLOAT_MULT.
-6. ◑ **Integer schemes**: ✅ FoR+bitpack, ✅ delta+bitpack; **pending** dictionary,
-   RLE(+recurse), Frequency, PFOR/patching.
+6. ◑ **Integer schemes**: ✅ FoR+bitpack, ✅ delta+bitpack, ✅ dictionary
+   (`dict.rs`), ✅ RLE (`rle.rs`); **pending** recursive/cascaded streams,
+   Frequency, PFOR/patching, and entropy-coding the dict codes.
 7. [ ] **Compute-on-encoded kernels** (filter/take/compare) for DB pushdown — the
    feature that makes us useful *inside* a query engine, not just a blob codec.
 8. [ ] **Nulls/validity** as a first-class compressed stream (Roaring/RLE), for Arrow.

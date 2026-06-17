@@ -20,16 +20,22 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
       winner — BtrBlocks/Vortex style). Sample is ~5–9× faster encode for ~2%
       ratio. A/B-able via `FCBENCH_SELECT=sample`.
 - [x] **Block-parallel** encode/decode (rayon, default-on `parallel` feature).
+- [x] **Speed/ratio levels** (`Config.level`: `Fastest`/`Fast`/`Balanced`/`Max`):
+      cost-aware selection `argmin(size + λ·decode_cost)` + per-level entropy-coder
+      gate. `Max` is the default and bit-identical to the historical output. See
+      [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 - [x] Diagnostics: per-mode win counters (`mode_win_counts`).
 
 **Entropy & SIMD substrate**
-- [x] **Binary range coder** (LZMA-style, order-1) + **tANS** on MSB-first bit I/O;
+- [x] **Binary range coder** (LZMA-style, order-1) + **rANS** interleaved coder;
       residuals pick the smaller.
 - [x] **CRC32C FCM hash** — hardware `_mm_crc32_u64` + bit-exact software fallback,
       runtime-dispatched.
 - [x] **FastLanes-style bit-packing** (`src/bitpack.rs`) — 1024-value lane-transposed
       pack/unpack, `multiversion`-dispatched, **verified to autovectorize** (AVX2
-      clone emits `ymm`, unlike byte-transpose); ~30 GiB/s.
+      clone emits `ymm`, unlike byte-transpose); ~30 GiB/s. Both a `u32` kernel
+      (widths 0..=32) and a `u64` kernel (`pack64`/`unpack64`, 0..=64) for wide
+      integer columns; `FOR_BITPACK` packs wide ranges instead of raw-fallback.
 
 **Codecs (16)**
 - [x] Float/general: `RAW`, `CONST`, `STRIDE`, `XORZ`, `PRED` (FCM), `PRED2` (DFCM),
@@ -59,22 +65,43 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
   5.30×; `timestamps` (irregular) → DELTA_BITPACK 4.88×; `decimal-outliers`
   → ALP 1.83× (where FLOAT_MULT bails on a single outlier).
 - Encode several× faster post-gating; decode beats `fc` on structured data
-  (parallel + tANS), trails on the noisy datasets (sequential range decode).
+  (parallel + rANS), trails on the noisy datasets (sequential range decode).
 
 ## Next (the columnar arc, prioritized)
 
-1. [ ] **ALP-RD** — the "real doubles" split-dictionary scheme (left=dict, right=
-       bitpack) for non-decimal floats; could beat byte-transpose on the noisy
-       long-tail. Algorithm captured in `docs/LANDSCAPE.md`.
-2. [ ] **PFOR patching** — move range-outliers to exceptions in FOR_BITPACK/ALP so
-       one large value doesn't widen (or raw-fall-back) a whole sub-block.
-3. [ ] **Dictionary** + **RLE** encodings (explicit, recursive like BtrBlocks) —
-       needed for low-cardinality and, later, strings.
-4. [ ] **Typed column API** — generalize off `f64` to `u32`/`u64`/`i*` lanes + a
-       type tag, so the integer codecs operate on real columns, not f64 bits.
-5. [ ] **Nulls / validity** as a first-class compressed stream (Arrow needs it).
-6. [ ] **Arrow adapter** (feature-gated) — map `arrow::Array` → (type, values,
-       validity) → codecs; benchmark vs Parquet/Vortex.
+1. [x] **ALP-RD** — the "real doubles" split-dictionary scheme (`alp_rd.rs`):
+       cut-search + 8-entry left dictionary + exceptions, wide `right` bit-packed.
+       Real-double columns now compress (and decode fast) instead of RAW.
+2. [x] **Dictionary** + **RLE** encodings (`dict.rs`, `rle.rs`). DICT compresses
+       both streams: codes (byte-plane entropy cascade) **and values** (sorted +
+       delta / transpose / entropy) — the value compression lifted the aggregate
+       to **2.70×** (beats zstd-9) since the raw dictionary dominated high-card
+       columns.
+3. ◑ **Cascade + rANS** — ✅ **interleaved rANS** (`entropy/rans.rs`, 4-way),
+       cost-chosen with the range coder/rANS: q-balanced decodes ~40% faster than
+       q-max. ✅ **dict→entropy cascade** for ≤256-cardinality blocks (basel_temp
+       2.13→3.22×). **Pending:** a wider-alphabet cascade for high-cardinality
+       columns (`medicare1`, ~46 K distinct/block), and `ALP digits → entropy`.
+4. [ ] **PFOR patching** — move range-outliers to exceptions in FOR_BITPACK/ALP so
+       one large value doesn't widen a whole sub-block.
+4. ◑ **Typed column API** — generalize off `f64` to real typed columns + a type
+       tag, so the integer codecs operate on real columns, not f64 bits.
+       **Done:** `DType`/`ColumnRef`/`Column` + `compress_column`, format v2
+       carries the column type, family-aware gating, **64-bit** (`F64`/`I64`/`U64`)
+       and **32-bit** (`I32`/`U32`) lanes with signedness-aware FoR and width-aware
+       RAW. Remaining: narrow `8/16`-bit, `F32`, decimals. See
+       [`docs/TYPES.md`](docs/TYPES.md).
+
+   Benchmarked against zstd/lz4/deflate on the ALP float corpus — see
+   [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). The losses there set the order
+   below: **ALP-RD** (real doubles fall back to RAW), **dictionary+RLE**
+   (repeated-value columns), and **cascading the ALP/FLOAT_MULT digits**.
+5. [x] **Nulls / validity** — Arrow-compatible bitmap (`src/validity.rs`), nulls
+       compacted out of the value stream, bitmap stored RLE/raw. `compress_column`
+       takes `Option<&[u8]>`; `decompress_column` returns values + validity.
+6. ◑ **Arrow adapter** (`src/arrow.rs`, feature `arrow`) — `compress_array`/
+       `decompress_array` for the primitive numeric arrays with validity
+       (incl. sliced). Pending: temporal/decimal + benchmark vs Parquet/Vortex.
 7. [ ] **Compute-on-encoded / predicate pushdown** (filter/take over encoded
        arrays) — Vortex's killer feature; the thing that makes us useful *inside*
        a query engine (DataFusion or any columnar store).
@@ -83,12 +110,12 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
 
 - **Two-stage option** (Parquet/ClickHouse model): lightweight encodings that keep
   random-access + pushdown, with optional LZ4_RAW/ZSTD page compression on top —
-  vs our current "own range/tANS coder per stream". Better for DB-storage layers.
+  vs our current "own range/rANS coder per stream". Better for DB-storage layers.
 - **bitshuffle** (bit-level transpose) as a generic preprocess; note: overlaps our
   bit-packing layout and competes with explicit cascades for the same redundancy.
 - **Cascading expression model** (FastLanes RPN / Vortex scheme trait) — generalize
   the flat mode list into composable encodings (dict→bitpack, RLE→recurse).
-- **u64 bit-packing** variant (current substrate is u32) for wide integer columns.
+- **u128 bit-packing** variant (substrate is now u32 + u64) for `Decimal128`.
 - **FSST** for strings; **CONV_N** linear predictors for smooth/periodic floats;
   **order-1 tANS** for faster noisy-data decode; **ARM/NEON** hash path.
 - Faster range decoder, or replace with interleaved rANS for SIMD decode.

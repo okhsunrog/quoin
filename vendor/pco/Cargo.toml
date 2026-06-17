@@ -1,0 +1,32 @@
+[package]
+name = "pco"
+version = "1.0.2"
+edition = "2021"
+rust-version = "1.87.0"
+description = "Vendored fork of pco (pcodec) — good compression for numerical sequences"
+license = "Apache-2.0"
+repository = "https://github.com/pcodec/pcodec"
+publish = false
+
+# Vendored fork of pco 1.0.2 (https://github.com/pcodec/pcodec), © mwlon,
+# Apache-2.0. Local changes (see NOTICE):
+#  * SIMD-via-`target-cpu=native` replaced by `multiversion` runtime dispatch,
+#    so the AVX2/AVX-512 clones are selected at run time and a native build is
+#    not required for fast decode.
+#  * `half`/f16 support removed (quoin does not expose an f16 lane).
+#  * upstream `build.rs` native-feature warning dropped.
+
+[dependencies]
+better_io = "0.2.0"
+dtype_dispatch = "0.2.1"
+rand_xoshiro = "0.6.0"
+# Per-CPU function cloning for the hot, autovectorizable kernels — replaces the
+# upstream reliance on a global `target-cpu=native`.
+multiversion = "0.8.0"
+
+[dev-dependencies]
+rand = "0.8.4"
+
+[lib]
+name = "pco"
+path = "src/lib.rs"

@@ -58,14 +58,17 @@ impl RangeEncoder {
     #[inline]
     fn encode_bit(&mut self, prob: &mut u16, bit: u32) {
         let bound = (self.range >> PROB_BITS) * u32::from(*prob);
-        if bit == 0 {
-            self.range = bound;
-            *prob += ((1 << PROB_BITS) - *prob) >> MOVE_BITS;
-        } else {
-            self.low += u64::from(bound);
-            self.range -= bound;
-            *prob -= *prob >> MOVE_BITS;
-        }
+        // Branchless: the per-bit decision is data-dependent and unpredictable
+        // (~37% of slots were lost to bad speculation here). `m` is all-ones for
+        // bit==1, zero for bit==0; both candidate updates are computed and
+        // mask-selected, producing output bit-identical to the branched form.
+        let m = 0u32.wrapping_sub(bit);
+        self.low += u64::from(bound & m);
+        self.range = (bound & !m) | ((self.range - bound) & m);
+        let p = u32::from(*prob);
+        let p0 = p + (((1 << PROB_BITS) - p) >> MOVE_BITS);
+        let p1 = p - (p >> MOVE_BITS);
+        *prob = ((p0 & !m) | (p1 & m)) as u16;
         while self.range < TOP {
             self.range <<= 8;
             self.shift_low();
@@ -118,17 +121,17 @@ impl<'a> RangeDecoder<'a> {
     #[inline]
     fn decode_bit(&mut self, prob: &mut u16) -> u32 {
         let bound = (self.range >> PROB_BITS) * u32::from(*prob);
-        let bit;
-        if self.code < bound {
-            self.range = bound;
-            *prob += ((1 << PROB_BITS) - *prob) >> MOVE_BITS;
-            bit = 0;
-        } else {
-            self.code -= bound;
-            self.range -= bound;
-            *prob -= *prob >> MOVE_BITS;
-            bit = 1;
-        }
+        // Branchless mask-select (see `encode_bit`): the `code < bound` test is
+        // the unpredictable, mispredict-heavy branch. `bit` is derived without a
+        // branch and used as a mask; the math matches the branched form exactly.
+        let bit = u32::from(self.code >= bound);
+        let m = 0u32.wrapping_sub(bit);
+        self.code -= bound & m;
+        self.range = (bound & !m) | ((self.range - bound) & m);
+        let p = u32::from(*prob);
+        let p0 = p + (((1 << PROB_BITS) - p) >> MOVE_BITS);
+        let p1 = p - (p >> MOVE_BITS);
+        *prob = ((p0 & !m) | (p1 & m)) as u16;
         while self.range < TOP {
             self.range <<= 8;
             self.code = (self.code << 8) | self.next_byte();
@@ -154,21 +157,30 @@ impl ByteModel {
 
     #[inline]
     fn encode(&mut self, enc: &mut RangeEncoder, ctx: usize, byte: u8) {
+        debug_assert!(ctx < 256 && self.probs.len() == 256 * 256);
         let base = ctx * 256;
         let mut node = 1usize;
         for i in (0..8).rev() {
             let bit = u32::from((byte >> i) & 1);
-            enc.encode_bit(&mut self.probs[base + node], bit);
+            // SAFETY: ctx < 256 ⇒ base ≤ 65280, and node ∈ [1, 255] across the
+            // 8-step bit-tree walk, so base + node ≤ 65535 < probs.len() (65536).
+            // This per-bit access is the range coder's hot path; eliding the
+            // bounds check is a measured, behavior-preserving win.
+            let p = unsafe { self.probs.get_unchecked_mut(base + node) };
+            enc.encode_bit(p, bit);
             node = (node << 1) | bit as usize;
         }
     }
 
     #[inline]
     fn decode(&mut self, dec: &mut RangeDecoder<'_>, ctx: usize) -> u8 {
+        debug_assert!(ctx < 256 && self.probs.len() == 256 * 256);
         let base = ctx * 256;
         let mut node = 1usize;
         for _ in 0..8 {
-            let bit = dec.decode_bit(&mut self.probs[base + node]);
+            // SAFETY: see `encode` — base + node ≤ 65535 < probs.len().
+            let p = unsafe { self.probs.get_unchecked_mut(base + node) };
+            let bit = dec.decode_bit(p);
             node = (node << 1) | bit as usize;
         }
         (node & 0xFF) as u8

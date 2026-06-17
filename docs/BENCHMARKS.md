@@ -1,0 +1,382 @@
+# Benchmarks
+
+## Real-world floating-point corpus (ALP double columns)
+
+The canonical float-compression corpus from the ALP paper (CWI, SIGMOD'24) — raw
+little-endian `f64` columns. Run a curated 15-column subset (the small/medium
+canonical columns; the multi-GB columns and the 2024 ML-embedding files are
+skipped for run time):
+
+```
+ALP_DIR=datasets/alp FCBENCH_TRIALS=2 cargo run --release --example compare \
+    --features bench-zstd,bench-lz4,bench-deflate
+```
+
+`datasets/` is git-ignored; fetch the corpus separately (the ALP repo's
+`complete_binaries.zip`). Each column is run across all four `quoin::Level`s and
+the baselines, reporting compression ratio + encode/decode MB/s (median of 2).
+
+### Aggregate (15 columns, 249 MB total)
+
+| Codec | Ratio | Notes |
+| --- | --- | --- |
+| zstd-19 | 2.86× | slow encode (~2–5 MB/s) |
+| **quoin q-max** | **2.82×** | full competition — near zstd-19, faster enc/dec |
+| quoin q-balanced | 2.65× | ~40% faster decode than q-max |
+| zstd-9 | 2.63× | |
+| quoin q-fast | 2.34× | no entropy coder, ~hundreds of MB/s |
+| deflate-6 | 2.35× | |
+| quoin q-fastest | 2.32× | no entropy coder |
+| lz4 | 1.65× | |
+
+quoin q-max lands near zstd-19 on aggregate and above zstd-9 — but
+the result is **strongly bimodal**, with wins on decimal-origin doubles and a
+few remaining gaps. The **fast levels are now genuinely competitive** (2.20–2.23×
+at hundreds of MB/s) after adding the non-entropy ALP-RD / dictionary / RLE
+codecs — they no longer fall back to RAW where the entropy modes are gated off.
+
+### Where quoin wins (decimal-origin doubles — ALP / FLOAT_MULT)
+
+Ratios, q-max vs zstd-19:
+
+| Column | quoin | zstd-19 |
+| --- | --- | --- |
+| neon_pm10_dust | **23.1×** | 14.5× |
+| city_temperature | **8.34×** | 6.13× |
+| neon_dew_point_temp | **6.23×** | 3.69× |
+| bird_migration | **6.03×** | 3.37× |
+| bitcoin | **2.73×** | 1.59× |
+| arade4 | **2.59×** | 2.20× |
+| bitcoin_transactions | **2.13×** | 1.77× |
+
+Where the values originated as decimals, ALP / FLOAT_MULT scale them to small
+integers and beat the general-purpose coders outright — often by large margins.
+
+### Remaining gaps
+
+After adding **ALP-RD** and **dictionary/RLE**:
+
+| Column | q-max | zstd-19 | Status |
+| --- | --- | --- | --- |
+| poi_lat | 1.00→**1.14×** | 1.75× | ALP-RD now used (was RAW). Decodes ~5× faster than zstd. |
+| poi_lon | 1.00→**1.12×** | 1.49× | ALP-RD. |
+| medicare1 | **2.01×** | 2.83× | DICT value compression + code entropy help, but high-cardinality billing sequences still trail zstd. |
+| basel_wind | 2.10× | 5.00× | ALP wins competition but underperforms — needs a second stage on the digits. |
+| basel_temp | **4.58×** | 3.95× | DICT code entropy now beats zstd on this column. |
+
+ALP-RD is the principled real-double codec: it trades a little ratio for big
+speed (poi decode ~3,000–6,000 MB/s vs zstd's ~1,000) — the ALP paper's intent,
+not a ratio play. Dictionary/RLE lifted the *fast* levels (they fill the slots
+that previously fell to RAW), and the dict-code entropy cascade closes several
+of the earlier repeated-value gaps.
+
+### Interleaved rANS + dict→entropy cascade
+
+A 4-way interleaved **rANS** coder (`entropy/rans.rs`) joins the range coder,
+chosen by the same cost-aware rule (`size + λ·decode_cost`). It delivers
+the **decode-speed** payoff of the level knob:
+
+| Level | aggregate ratio | mean decode MB/s |
+| --- | --- | --- |
+| q-max | 2.53× | 1,006 |
+| **q-balanced** | **2.48×** | **1,392** |
+| zstd-19 | 2.86× | 933 |
+
+q-balanced now **decodes ~40% faster than q-max and faster than zstd-19** for a
+~2% ratio cost — it prefers the fast rANS coder where the range coder would only
+be marginally smaller.
+
+The **dict→entropy cascade** entropy-codes the dictionary codes (when the level
+allows it), splitting them into **byte-planes** — 1 plane for ≤256-cardinality,
+2 for ≤65536 — so it reaches high-cardinality columns too:
+
+- `basel_temp` (602 distinct): **2.13→4.58×**, now **beating zstd-19** (3.95×).
+- `medicare1` (~46,500 distinct/block): **1.58→2.01×**.
+
+The dictionary **values** are also compressed (not just the codes): the distinct
+values are sorted (codes remapped to the sorted order, free), then stored as the
+smallest of raw / delta→bit-pack / byte-transpose→entropy. For high-cardinality
+columns the raw dictionary (≈ 372 KB/block for medicare) dominated the output, so
+this was the bigger lever — it lifted **every** level (any moderate-cardinality
+column now wins more DICT blocks).
+
+The last medicare lever was **LZ on high-cardinality blocks**: the old gate
+skipped LZ when value cardinality was high (>2048 distinct), but billing-style
+data has repeated multi-value *sequences* that LZ catches even though individual
+values rarely repeat. At `Max` (best-ratio, encode-cost-tolerant) LZ now runs on
+any compressible block; it wins **276 of medicare's blocks** and lifts it
+**1.82→2.01×**, taking the aggregate to **2.82× — a tie with zstd-19** (faster on
+both encode and decode). Faster levels keep the cheap cardinality gate, since
+LZ's match-finding is expensive and loses on non-repetitive data.
+
+### The speed/ratio knob
+
+The level dial behaves as designed — faster levels trade ratio for large speed
+gains, and the entropy-coder gate is the dominant axis on decode:
+
+| Column | level | ratio | enc MB/s | dec MB/s |
+| --- | --- | --- | --- | --- |
+| city_temperature | q-fastest | 5.90× | 706 | 2429 |
+| city_temperature | q-max | 8.34× | 38 | 1302 |
+| bitcoin_transactions | q-fast | 1.00× | 377 | 5142 |
+| bitcoin_transactions | q-max | 2.13× | 94 | 206 |
+
+`q-fastest`/`q-fast` (no entropy coder) decode at 2,000–7,000 MB/s — competitive
+with lz4 — while `q-max` decode drops to 200–800 MB/s on entropy-heavy columns.
+That gap is the order-1 range coder, and quantifies the case for replacing it
+with interleaved rANS (see [`PERFORMANCE.md`](PERFORMANCE.md)).
+
+### Notes
+
+- The C `fc` baseline (`bench-fc`) **aborts with heap corruption** (`free():
+  invalid size`) inside its own C code on `arade4`, so it's excluded from the
+  corpus run; the synthetic suite still compares against it.
+- Run with `FCBENCH_TRIALS=1` for a quick pass; larger columns dominate wall time.
+
+## Synthetic suite
+
+`cargo run --release --example compare --features bench-zstd,bench-lz4,bench-deflate`
+runs the 17 generators ported 1:1 from `fc`'s test harness (aggregate ~3.05×
+f64). See `examples/compare.rs`.
+
+## Typed columns: Pareto front and vs lz4 / Parquet
+
+Real typed columns (`i64`/`i32`/`u32`/`f64` via `compress_column`, not f64-smuggled
+ints), reporting **ratio × encode MB/s × decode MB/s** — a Pareto comparison, not
+just aggregate ratio.
+
+### Fairness: one block size for everyone (`BLOCK_VALUES`)
+
+All three harnesses take a `BLOCK_VALUES` env (block size in **rows**): every tool
+then compresses in independent blocks of the *same* row count — quoin via
+`Config.block_size`, the byte baselines (lz4/zstd/deflate/bitshuffle) paged at
+`BLOCK_VALUES × element_width`, Parquet via `set_max_row_group_row_count` /
+`set_data_page_row_count_limit`, Vortex by slicing the array into chunks. So no tool
+gets a wider cross-block window than another. `BLOCK_VALUES=0` (default) is *native*
+mode: quoin adaptive, byte tools whole-buffer, Vortex whole-array.
+
+**Ratios are only apples-to-apples at a matched `BLOCK_VALUES`.** Running fair
+(e.g. 8192 rows) corrected two native-mode impressions: quoin's `ids_i64` edge over
+Vortex was largely quoin's *adaptive larger block* (at equal 8192 Vortex wins
+`ids`), and Vortex's `sensor`/`narrow` wins are **genuine codec advantages** (they
+persist at equal block, ~8.3× on `sensor_f64`), not a window artifact. quoin still
+leads the aggregate at equal block (vs Vortex 4.15× vs 3.09×; vs Parquet by large
+margins), and the decimal wins hold (`dec256` 11× vs 2×).
+
+`examples/pareto.rs` (`--features bench-zstd,bench-lz4,bench-deflate`): quoin's four
+levels vs lz4 / the zstd ladder / deflate. **quoin q-fast Pareto-dominates lz4** —
+better ratio (3.2× vs 1.84×) *and* faster encode *and* faster decode. The harness
+also includes a **per-page zstd** baseline (`zstd-9p`, 1 MiB pages = the realistic
+column-store granularity): whole-stream zstd's edge on periodic data is mostly its
+giant window (zstd-9 on `ids_i64` 7543× → 2374× when paged; on `narrow_i32`
+1723× → 489×, which quoin's 664× *beats*). At fair page granularity quoin q-max
+(3.90×) tops the whole zstd ladder on aggregate ratio.
+
+`examples/vs_columnar.rs` (`--features bench-parquet`): quoin via the Arrow adapter
+vs **Parquet** (dictionary/RLE/delta + page compression — itself internally paged,
+so a fair comparison). Aggregate over the typed columns:
+
+| codec | ratio | enc MB/s | dec MB/s |
+| --- | --- | --- | --- |
+| **quoin-max** | **3.42×** | 86 | 1233 |
+| **quoin-fast** | **2.82×** | 711 | 2392 |
+| parquet-zstd9 | 2.45× | 98 | 1483 |
+| parquet-snappy | 1.95× | 457 | 2143 |
+| parquet-plain | 1.54× | 537 | 4475 |
+
+quoin-max gets **40% better ratio** than Parquet+zstd, and **quoin-fast
+Pareto-dominates parquet-zstd9** (better ratio, ~7× faster encode, faster decode).
+Type-awareness wins big where Parquet's generic path can't: `ids_i64` 1521× vs
+179×, `narrow_i32` 664× vs 52×, `sensor_f64` 2.41× vs 1.09×, `decimals_f64` 3.14×
+vs 2.07×, `timestamps_i64` 4.88× vs 3.37×; low-cardinality columns tie (both
+dictionary-encode).
+
+### vs Vortex (the direct competitor)
+
+`examples/vs_vortex.rs` (`--features bench-vortex`): quoin vs **Vortex** 0.75 — the
+closest competitor (Rust columnar, cascading typed encodings ALP/FastLanes/dict/FSST
+chosen by a sampling compressor). Two Vortex configs mirror quoin's two tiers:
+`vortex-btr` (lightweight BtrBlocks) and `vortex-compact` (BtrBlocks + zstd value
+pages). Same eight columns as the Parquet bench. *Fairness caveat:* Vortex size is
+its compressed `array.nbytes()` — the in-memory tree footprint Vortex's own README
+reports as ratio; it excludes the file container/footer, so it **slightly favours
+Vortex** vs quoin's serialized bytes. Aggregate:
+
+| codec | ratio | notes |
+| --- | --- | --- |
+| **vortex-compact** | **4.06×** | zstd-backed max tier — strongest here |
+| **quoin-max** | 3.42× | |
+| **quoin-fast** | **2.82×** | beats Vortex's light tier |
+| vortex-btr | 2.27× | lightweight, no zstd |
+
+The result is **split by tier**:
+
+- **Light tier — quoin-fast wins (2.82× vs 2.27×).** quoin's lightweight delta/dict
+  cascades beat Vortex's non-zstd encodings, decisively on `timestamps_i64` (4.88×
+  vs 2.00×) and also on `sensor_f64` (1.69× vs 1.16×) and `narrow_i32` (3.96× vs
+  3.20×). quoin-fast is the better fast columnar codec on this suite.
+- **Max tier — vortex-compact wins (4.06× vs 3.42×).** Vortex layers zstd on top of
+  its typed encodings, which closes two columns quoin doesn't: **`sensor_f64` 8.75×
+  vs 2.41×** (smooth `sin + drift` double — Vortex's ALP+zstd catches it; quoin
+  falls to FCM-predictor + entropy) and **`narrow_i32` 1511× vs 664×** (cyclic int
+  — zstd over the encoded run beats quoin's LZ). quoin-max still wins `ids_i64`
+  (1521× vs 1392×); `lowcard`, `categorical`, `decimals` tie.
+
+Net (this snapshot): **quoin owns the fast/light tier; Vortex's zstd-backed max
+tier edges quoin-max**, driven almost entirely by smooth-double (`sensor`) and
+cyclic-int (`narrow`) columns. The two levers that close and then *reverse* this
+are an in-house **final-stage LZ codec** over quoin's transformed residuals
+(cyclic-int) and, for the smooth doubles, the **polynomial predictor** plus the
+**vendored pco backend** — all below. With those, quoin-max leads the aggregate
+(4.87× vs 3.09×) *and* both `sensor` columns; see "pco backend" below.
+
+### LZ-as-a-cascade-stage (our own final stage)
+
+`code_residuals` (the entropy stage every predictor/transform mode cascades into)
+gained an optional **LZ stage at `Max`**: it runs quoin's own byte LZ over the
+*transformed residual*, then entropy-codes the result, and keeps it only when
+strictly smaller. This captures long-range repeats a transform leaves behind that
+the order-1 model can't — **with no external dependency** (the whole point: the
+moat stays quoin's own numeric codecs + cascade, not "we call zstd"). It flips
+exactly the cyclic-integer columns where stronger external LZ used to beat us:
+
+| column (Max) | before | after | vs vortex-compact @8192 |
+| --- | --- | --- | --- |
+| `narrow_i32` | 663× | **10330×** | 881× (was losing 339×) |
+| `ids_i64` | 1522× | **21290×** | **quoin 1543× > 926×** at fair block |
+
+At a fair equal block (8192 rows), the LZ cascade **flips `ids_i64` ahead of
+Vortex** (was 379× < 926×) and closes most of `narrow`; the Vortex aggregate gap
+widens in quoin's favour (4.20× vs 3.09×). It is gated to `Max` (it adds decode
+cost), so the faster tiers stay random-access.
+
+The one column the LZ cascade does **not** move is `sensor_f64` (smooth
+`sin+drift`): its residual has no byte-level repeats, so that is a *predictor*
+gap — closed next.
+
+### Polynomial float predictor (the smooth-signal lever)
+
+The float predictor (`DELTA2`/`DELTA_DP`) was generalized from fixed order-2 to a
+per-block **order 1–4** Newton forward-difference extrapolator (linear → cubic).
+The order-`d` predictor's residual is the `d`-th finite difference, which *shrinks*
+on smooth data as `d` rises and *grows* on noise — so a cheap finite-difference
+probe (`select_order`) picks the order: smooth/finely-sampled signals get a sharp
+high-order prediction, noisy data backs off (never amplifying noise). It is purely
+in-house and lossless (the exact-residual variant self-bails when float subtraction
+isn't invertible).
+
+| column (Max) | before | after | vs vortex-compact |
+| --- | --- | --- | --- |
+| `sensor_f64` (smooth) | 2.32× | **5.71×** | 8.31× |
+| `sensor_f32` | 4.76× | **6.56×** | 7.18× |
+
+This closes most of the smooth-signal gap (≈ 28% → 69% of Vortex on `sensor_f64`,
+nearly even on `sensor_f32`). Combined with the LZ cascade, **quoin-max's aggregate
+rose to 4.64× — now well ahead of vortex-compact's 3.08×** on this suite, leading
+the aggregate *and* most columns; Vortex retains a clear edge only on the smoothest
+double (`sensor_f64`). This class — sensors/telemetry/audio/scientific time series —
+is the most common "hard" float in a column store, so the predictor has broad reach
+beyond the benchmark.
+
+### pco backend (closes the last smooth-double gap)
+
+The one column Vortex still led — `sensor_f64` — is exactly where Vortex's own
+numeric layer uses **pcodec** (pco). So quoin vendored pco (`vendor/pco`,
+Apache-2.0) and wired it as a competing block mode (`Mode::Pco`) at `High`/`Max`.
+It self-bails on tiny blocks and competes on pure size, so it only wins when
+strictly smaller. On `sensor_f64` it wins **every** block, taking quoin-max past
+Vortex on its home turf:
+
+| column (Max) | quoin pre-pco | quoin + pco | vortex-compact |
+| --- | --- | --- | --- |
+| `sensor_f64` | 5.71× | **9.07×** | 8.75× |
+| `sensor_f32` | 6.56× | **7.50×** | 7.16× |
+
+quoin-max now **leads vortex-compact on both smooth-double columns** as well as
+the aggregate (4.87× vs 3.09× on the full vs-Vortex suite). The fork drops pco's
+`half`/f16 support and — crucially — replaces pco's reliance on a global
+`-C target-cpu=native` build with `#[multiversion]` per-CPU clones on its three
+vectorizable decode leaves (offset unpack, latent reconstruct, center-toggle).
+A profiled `sensor_f64` decode showed this **recovers +27%** over a stock
+non-native build — beating even a `target-cpu=native` build — while pco's two
+serial hot spots (interleaved-ANS symbol decode, delta prefix-sum) stay scalar
+because neither vectorizes. pco decode through quoin runs at **~2.8–3.4 GB/s**
+on `sensor_f64`, several times faster than vortex-compact's decode of the same
+column. See `vendor/pco/NOTICE` for the full list of fork changes.
+
+### Float32 lane
+
+`Float32` columns widen each value to its exact `f64` on the lane, so the whole f64
+codec set applies; RAW narrows back to 4 B. Two f32 columns were added to both the
+Parquet and Vortex benches:
+
+| column | quoin-max | parquet-zstd9 | vortex-compact |
+| --- | --- | --- | --- |
+| `sensor_f32` (smooth sin+drift) | **4.60×** | 1.09× | 7.16× |
+| `decimals_f32` (k/100 → real f32) | 1.18× | 1.02× | 1.28× |
+
+- **quoin crushes Parquet on f32** where there's structure (`sensor_f32` 4.60× vs
+  1.09×). f32 quantization actually *helps* quoin's predictors: the same smooth
+  column compresses **better as f32 (4.60×) than as f64 (2.41×)** — fewer mantissa
+  bits to predict. quoin-fast gates the entropy/predictor modes off, so f32 needs
+  the Max tier (1.00× at Fast).
+- **`decimals_f32` is the hard case** — `k/100` isn't representable in f32, so the
+  values are effectively real doubles (ALP fails → ALP-RD territory). quoin 1.18×
+  barely leads Parquet 1.02×; Vortex 1.28× edges ahead with its f32 ALP-RD.
+- vs Vortex the f64 pattern repeats: quoin-max beats Vortex's light tier but
+  Vortex's zstd-backed compact wins `sensor_f32` (7.16× vs 4.60×) — the same
+  smooth-double + zstd-final-stage lever.
+
+Aggregate over the 10-column suite (8 base + 2 f32): quoin-max **3.10×** vs
+parquet-zstd9 2.10× (quoin leads); vs Vortex, quoin-max 3.10× / quoin-fast 2.30× vs
+vortex-compact 3.66× / vortex-btr 2.05× (tier split unchanged).
+
+The remaining f32/f64 max-tier lever (smooth-double + an optional zstd/LZ final
+stage) is deferred behind the Decimal128/256 lane work.
+
+### Decimal128 lane (the billing-data type)
+
+`Decimal128` is the real target type for money/measurements. quoin handles it with
+a **limb-split container** (`src/decimal.rs`): subtract the column `vmin`, split the
+offset into 64-bit limbs, and run each limb through the full integer engine — the
+high limb is `CONST` (~free) in the common case, the low limb gets per-block FoR.
+A billing-like column (amounts in cents, scale 2):
+
+| column (16 B/value raw) | quoin | parquet-zstd9 | vortex-compact | vortex-btr |
+| --- | --- | --- | --- | --- |
+| `amounts_dec128` | **5.55×** | 4.79× | 5.75× | 5.57× |
+
+- **quoin beats Parquet (5.55× vs 4.79×)** and is **statistically tied with Vortex**
+  (5.55× vs 5.57–5.75×) — on the most important type, the limb-split design holds
+  its own against the best-in-class columnar format. The ratio is identical at
+  quoin-fast and quoin-max (the FoR/bit-pack path is in both tiers).
+- Real billing data (repeated amounts) would compress further via the dict/LZ modes
+  the limbs inherit for free.
+- Lossless across the full `i128` range (`MIN`/`MAX`, mixed sign, genuine 128-bit
+  spread), nullable, with Arrow precision/scale preserved.
+
+11-column aggregate (incl. decimal): quoin-max **3.40×** vs parquet-zstd9 2.37×
+(quoin leads); vs Vortex the tier split persists (vortex-compact 3.95× > quoin-max
+3.40× > quoin-fast 2.60× > vortex-btr 2.35×).
+
+### Decimal256 lane — a decisive design win
+
+`Decimal256` reuses the same limb-split container with 4 limbs (32-byte `vmin`).
+High-precision amounts (scale 8) around a large 256-bit base:
+
+| column (32 B/value raw) | quoin | parquet-zstd9 | vortex-compact | vortex-btr |
+| --- | --- | --- | --- | --- |
+| `amounts_dec256` | **11.09×** | 10.58× | 2.00× | 2.00× |
+
+- **quoin beats Parquet (11.09× vs 10.58×) and crushes Vortex (2.00×).** quoin's
+  `vmin` subtraction removes the large constant base, so three of the four limbs go
+  to `CONST` and the low limb bit-packs the small spread. Vortex appears not to
+  min-subtract decimals — its 16 high bytes are simply zero (→ 2×). This is exactly
+  the realistic Decimal256 case (a high-magnitude base with a modest spread), and
+  the limb-split design is purpose-built for it.
+
+12-column aggregate (incl. both decimals): **quoin-max 4.24× now leads
+vortex-compact 3.09×** (the decimal columns swing it), quoin-fast 3.33× vs
+vortex-btr 2.24×, vs parquet-zstd9 3.04×. Vortex still wins the individual
+smooth-double (`sensor`) and cyclic-int (`narrow`) columns; quoin wins decimals,
+timestamps, ids, and the whole light tier.

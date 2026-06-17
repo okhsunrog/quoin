@@ -52,6 +52,29 @@ fn random_bytes_never_panic() {
 }
 
 #[test]
+fn huge_validity_length_is_rejected_not_allocated() {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"FCR1"); // magic
+    buf.push(2); // format version
+    buf.push(1); // validity flag
+    buf.push(16); // predictor_log2
+    buf.push(0); // F64 dtype
+    buf.extend_from_slice(&u64::MAX.to_le_bytes()); // impossible logical length
+    buf.push(1); // validity blob length
+    buf.push(0); // raw validity tag, but no huge bitmap follows
+
+    let r = catch_unwind(AssertUnwindSafe(|| decompress(&buf)));
+    assert!(
+        r.is_ok(),
+        "decompress must not panic/abort on huge validity length"
+    );
+    assert!(
+        r.unwrap().is_err(),
+        "malformed huge stream must be rejected"
+    );
+}
+
+#[test]
 fn mutated_streams_never_panic() {
     let seeds = seeds();
     let mut s = 0x1357_9bdfu64;

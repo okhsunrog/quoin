@@ -12,14 +12,17 @@ fn sample_selection_roundtrips() {
         s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
         s
     };
-    let cfg = Config { selection: Selection::Sample, ..Default::default() };
+    let cfg = Config {
+        selection: Selection::Sample,
+        ..Default::default()
+    };
     let datasets: Vec<Vec<f64>> = vec![
-        (0..70_000).map(|i| i as f64 * 0.5).collect(),       // ramp
+        (0..70_000).map(|i| i as f64 * 0.5).collect(), // ramp
         (0..70_000).map(|i| (i as f64 * 1e-4).sin()).collect(), // smooth
-        (0..70_000).map(|i| (i & 15) as f64).collect(),      // dict
+        (0..70_000).map(|i| (i & 15) as f64).collect(), // dict
         (0..70_000).map(|i| (i % 1000) as f64 / 100.0).collect(), // decimal
         (0..70_000).map(|_| f64::from_bits(lcg())).collect(), // random
-        vec![42.0; 70_000],                                  // const
+        vec![42.0; 70_000],                            // const
     ];
     for data in datasets {
         let packed = compress(&data, cfg);

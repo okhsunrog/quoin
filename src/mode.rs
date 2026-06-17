@@ -41,6 +41,15 @@ pub enum Mode {
     Alp = 9,
     /// First-order delta + FoR + bit-packing (Parquet DELTA_BINARY_PACKED).
     DeltaBitpack = 51,
+    /// ALP-RD: real-double split — dictionary the high bits, bit-pack the low.
+    AlpRd = 52,
+    /// Dictionary: distinct values → bit-packed codes (low-cardinality columns).
+    Dict = 19,
+    /// Run-length encoding: (value, run-length) pairs (grouped/repeated columns).
+    Rle = 53,
+    /// Vendored pco (pcodec) numeric backend: latent decomposition + bin-packing
+    /// + ANS. Heavyweight ratio mode, gated to `High`/`Max`.
+    Pco = 54,
 }
 
 impl Mode {
@@ -66,6 +75,10 @@ impl Mode {
             50 => Mode::ForBitpack,
             9 => Mode::Alp,
             51 => Mode::DeltaBitpack,
+            52 => Mode::AlpRd,
+            19 => Mode::Dict,
+            53 => Mode::Rle,
+            54 => Mode::Pco,
             other => return Err(Error::UnknownMode(other)),
         })
     }
@@ -125,6 +138,9 @@ pub fn mode_name(id: u8) -> &'static str {
         49 => "BWT_MTF_RC",
         50 => "FOR_BITPACK", // quoin extension (fc reserves 50-63)
         51 => "DELTA_BITPACK",
+        52 => "ALP_RD",
+        53 => "RLE",
+        54 => "PCO",
         _ => "?",
     }
 }

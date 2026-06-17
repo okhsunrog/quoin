@@ -1,20 +1,28 @@
-//! Benchmark harness: compression ratio + encode/decode throughput across the
-//! same 17 synthetic datasets as the upstream C `fc` test harness.
+//! Benchmark harness: compression ratio + encode/decode throughput.
+//!
+//! Two modes:
+//!   * synthetic — the same 17 generators as the upstream C `fc` test harness.
+//!   * real files — set `ALP_DIR` to a directory of raw little-endian `f64`
+//!     `.bin` columns (e.g. the ALP benchmark corpus); each file is benchmarked
+//!     across the four [`quoin::Level`]s plus the enabled baselines.
 //!
 //! Usage:
 //!   cargo run --release --example compare
-//!   cargo run --release --example compare --features bench-zstd
-//!   FC_SRC_DIR=../fc cargo run --release --example compare --features bench-zstd,bench-fc
+//!   cargo run --release --example compare --features bench-zstd,bench-lz4,bench-deflate
+//!   ALP_DIR=datasets/alp FCBENCH_TRIALS=2 cargo run --release --example compare \
+//!       --features bench-zstd,bench-lz4,bench-deflate,bench-fc
 //!
-//! Env: FCBENCH_N (values per dataset, default 1<<20), FCBENCH_TRIALS (default 5).
+//! Env: FCBENCH_N (synthetic values/dataset, default 1<<20),
+//!      FCBENCH_TRIALS (default 5), ALP_DIR (real-file mode), FCBENCH_SELECT=sample.
 
 // The dataset generators are ported 1:1 from fc/test_fc.c, including its
 // hand-written `3.14159265358979` literal — keep it for byte-identical data.
 #![allow(clippy::approx_constant)]
 
+use std::path::Path;
 use std::time::Instant;
 
-use quoin::{Config, compress, decompress};
+use quoin::{Config, Level, compress, decompress};
 
 // ---------------------------------------------------------------------------
 // Synthetic datasets, ported 1:1 from fc/test_fc.c so results are comparable.
@@ -304,9 +312,12 @@ fn our_config() -> Config {
 }
 
 fn bench_ours(data: &[f64], trials: usize) -> Row {
+    bench_ours_cfg(data, our_config(), trials)
+}
+
+fn bench_ours_cfg(data: &[f64], cfg: Config, trials: usize) -> Row {
     let orig = data.len() * 8;
     let mut packed = Vec::new();
-    let cfg = our_config();
     quoin::reset_mode_win_counts();
     let (enc_s, _) = time_median(trials, || {
         packed = compress(data, cfg);
@@ -322,6 +333,73 @@ fn bench_ours(data: &[f64], trials: usize) -> Row {
         ok: bits_eq(data, &restored),
         modes,
     }
+}
+
+#[cfg(feature = "bench-lz4")]
+fn bench_lz4(data: &[f64], trials: usize) -> Row {
+    let orig = data.len() * 8;
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, orig) };
+    let mut packed = Vec::new();
+    let (enc_s, _) = time_median(trials, || {
+        packed = lz4_flex::compress_prepend_size(bytes);
+        packed.len()
+    });
+    let (dec_s, restored) = time_median(trials, || {
+        lz4_flex::decompress_size_prepended(&packed).expect("lz4 dec")
+    });
+    Row {
+        comp: packed.len(),
+        ratio: orig as f64 / packed.len().max(1) as f64,
+        enc_mbps: mbps(orig, enc_s),
+        dec_mbps: mbps(orig, dec_s),
+        ok: restored == bytes,
+        modes: String::new(),
+    }
+}
+
+#[cfg(feature = "bench-deflate")]
+fn bench_deflate(data: &[f64], level: u32, trials: usize) -> Row {
+    use flate2::Compression;
+    use flate2::read::{ZlibDecoder, ZlibEncoder};
+    use std::io::Read;
+    let orig = data.len() * 8;
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, orig) };
+    let mut packed = Vec::new();
+    let (enc_s, _) = time_median(trials, || {
+        packed.clear();
+        ZlibEncoder::new(bytes, Compression::new(level))
+            .read_to_end(&mut packed)
+            .expect("deflate enc");
+        packed.len()
+    });
+    let (dec_s, restored) = time_median(trials, || {
+        let mut out = Vec::with_capacity(orig);
+        ZlibDecoder::new(&packed[..])
+            .read_to_end(&mut out)
+            .expect("deflate dec");
+        out
+    });
+    Row {
+        comp: packed.len(),
+        ratio: orig as f64 / packed.len().max(1) as f64,
+        enc_mbps: mbps(orig, enc_s),
+        dec_mbps: mbps(orig, dec_s),
+        ok: restored == bytes,
+        modes: String::new(),
+    }
+}
+
+/// Load a column of raw little-endian `f64` (the ALP corpus `.bin` format).
+fn load_f64_bin(path: &Path) -> Vec<f64> {
+    let bytes = std::fs::read(path).expect("read .bin");
+    assert!(
+        bytes.len().is_multiple_of(8),
+        "{path:?}: not a multiple of 8 bytes"
+    );
+    bytes
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 #[cfg(feature = "bench-zstd")]
@@ -408,56 +486,117 @@ fn print_row(ds: &str, codec: &str, r: &Row) {
         format!("  {}{flag}", r.modes)
     };
     println!(
-        "{ds:<16} {codec:<10} {:>10} {:>8.2}x {:>9.0} {:>9.0}{tail}",
+        "{ds:<22} {codec:<11} {:>12} {:>7.2}x {:>9.0} {:>9.0}{tail}",
         r.comp, r.ratio, r.enc_mbps, r.dec_mbps
     );
 }
 
+/// Print the baseline rows (zstd/lz4/deflate/fc) for one dataset.
+fn print_baselines(name: &str, data: &[f64], trials: usize) {
+    #[cfg(feature = "bench-zstd")]
+    {
+        print_row(name, "zstd-9", &bench_zstd(data, 9, trials));
+        print_row(name, "zstd-19", &bench_zstd(data, 19, trials));
+    }
+    #[cfg(feature = "bench-lz4")]
+    print_row(name, "lz4", &bench_lz4(data, trials));
+    #[cfg(feature = "bench-deflate")]
+    print_row(name, "deflate-6", &bench_deflate(data, 6, trials));
+    #[cfg(feature = "bench-fc")]
+    print_row(name, "fc(C)", &bench_fc(data, trials));
+    let _ = (name, data, trials);
+}
+
+fn header() {
+    println!(
+        "{:<22} {:<11} {:>12} {:>8} {:>9} {:>9}",
+        "dataset", "codec", "bytes", "ratio", "enc MB/s", "dec MB/s"
+    );
+}
+
+/// The four levels, fastest → max-ratio, with the column label used in output.
+const LEVELS: [(&str, Level); 4] = [
+    ("q-fastest", Level::Fastest),
+    ("q-fast", Level::Fast),
+    ("q-balanced", Level::Balanced),
+    ("q-max", Level::Max),
+];
+
 fn main() {
-    let n: usize = std::env::var("FCBENCH_N")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1 << 20);
     let trials: usize = std::env::var("FCBENCH_TRIALS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
     println!("{}", quoin::VERSION);
+
+    // Aggregates for the headline config (q-max / ours).
+    let mut tot_orig = 0usize;
+    let mut tot_comp = 0usize;
+
+    if let Ok(dir) = std::env::var("ALP_DIR") {
+        // Real-file mode: sweep all levels per column + baselines.
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("ALP_DIR {dir:?}: {e}"))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "bin"))
+            .collect();
+        files.sort();
+        println!(
+            "ALP corpus: {} columns from {dir}, median of {trials}\n",
+            files.len()
+        );
+        header();
+        for path in &files {
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let name: String = stem
+                .strip_suffix("_f")
+                .unwrap_or(&stem)
+                .chars()
+                .take(22)
+                .collect();
+            let data = load_f64_bin(path);
+            let base = our_config();
+            for (label, level) in LEVELS {
+                let row = bench_ours_cfg(&data, Config { level, ..base }, trials);
+                if level == Level::Max {
+                    tot_orig += data.len() * 8;
+                    tot_comp += row.comp;
+                }
+                print_row(&name, label, &row);
+            }
+            print_baselines(&name, &data, trials);
+            println!();
+        }
+        println!(
+            "AGGREGATE (q-max): {} -> {} bytes, overall ratio {:.2}x",
+            tot_orig,
+            tot_comp,
+            tot_orig as f64 / tot_comp.max(1) as f64
+        );
+        return;
+    }
+
+    // Synthetic mode (default).
+    let n: usize = std::env::var("FCBENCH_N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1 << 20);
     println!(
         "datasets: {} x {n} values ({} MiB each), median of {trials}\n",
         DATASETS.len(),
         n * 8 / (1 << 20)
     );
-    println!(
-        "{:<16} {:<10} {:>10} {:>9} {:>9} {:>9}",
-        "dataset", "codec", "bytes", "ratio", "enc MB/s", "dec MB/s"
-    );
-
-    // Aggregates for `ours`.
-    let mut tot_orig = 0usize;
-    let mut tot_comp = 0usize;
-
+    header();
     for (name, make) in DATASETS {
         let data = make(n);
-        let orig = data.len() * 8;
-
         let ours = bench_ours(&data, trials);
-        tot_orig += orig;
+        tot_orig += data.len() * 8;
         tot_comp += ours.comp;
         print_row(name, "ours", &ours);
-
-        #[cfg(feature = "bench-zstd")]
-        {
-            print_row(name, "zstd-3", &bench_zstd(&data, 3, trials));
-            print_row(name, "zstd-9", &bench_zstd(&data, 9, trials));
-        }
-        #[cfg(feature = "bench-fc")]
-        print_row(name, "fc(C)", &bench_fc(&data, trials));
-
+        print_baselines(name, &data, trials);
         println!();
     }
-
     println!(
         "AGGREGATE (ours): {} -> {} bytes, overall ratio {:.2}x",
         tot_orig,

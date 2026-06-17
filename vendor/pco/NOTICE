@@ -1,0 +1,19 @@
+This directory contains a vendored fork of `pco` (the `pcodec` project),
+version 1.0.2, retrieved from https://github.com/pcodec/pcodec.
+
+  Original work © mwlon <m.w.loncaric@gmail.com> and the pcodec contributors,
+  licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The fork is maintained inside the `quoin` repository and differs from upstream
+1.0.2 in the following ways:
+
+  * The hot, autovectorizable kernels are annotated with `#[multiversion]`
+    (baseline / AVX2 / AVX-512 clones dispatched at run time via CPU-feature
+    detection), replacing upstream's reliance on a global `-C target-cpu=native`
+    build. A native build is no longer required for fast decode, and the same
+    binary runs correctly on older CPUs via the scalar baseline clone.
+  * `half` / f16 support is removed; quoin does not expose an f16 lane.
+  * The upstream `build.rs` (which printed a native-feature build warning) is
+    removed.
+
+All modifications are likewise licensed under the Apache License, Version 2.0.

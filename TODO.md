@@ -40,23 +40,23 @@ in that code (fork caveat documented in the header).
 
 ### FFI correctness footguns (must handle)
 
-- [ ] **Panics must not cross `extern "C"`** — a rayon worker can panic (e.g.
+- [x] **Panics must not cross `extern "C"`** — a rayon worker can panic (e.g.
       OOM in a block); unwinding across the boundary is UB. Wrap every
       `extern "C"` fn in `catch_unwind` → error code.
-- [ ] **`fork()` without `exec`** — rayon worker threads don't survive a fork,
+- [x] **`fork()` without `exec`** — rayon worker threads don't survive a fork,
       so compressing in a child after the pool was started deadlocks. Document
       the caveat; the context handle lets the host control when threads exist.
-- [ ] **Thread lifetime vs teardown** — global-pool threads persist; `dlclose`
+- [x] **Thread lifetime vs teardown** — global-pool threads persist; `dlclose`
       while they're alive is unsafe. Context handle gives deterministic
       teardown via `quoin_ctx_free`.
 
 ### API surface
 
-- [ ] `extern "C"` wrappers: `quoin_compress` / `quoin_decompress` (global pool),
+- [x] `extern "C"` wrappers: `quoin_compress` / `quoin_decompress` (global pool),
       `quoin_ctx_create(threads)` / `quoin_compress_ctx` / `quoin_ctx_free`.
-- [ ] Error codes (no panics, no `Result` across the boundary); map
+- [x] Error codes (no panics, no `Result` across the boundary); map
       [`Error`](src/error.rs) variants to integers.
-- [ ] Caller-sized output buffers + a `comp_bound`-style sizing helper.
-- [ ] Generate a C header (e.g. `cbindgen`).
-- [ ] `cdylib` + `staticlib` crate-types; keep the `parallel` feature working
+- [x] Caller-sized output buffers + a `comp_bound`-style sizing helper.
+- [x] Generate a C header (e.g. `cbindgen`).
+- [x] `cdylib` + `staticlib` crate-types; keep the `parallel` feature working
       both on and off across the C API.

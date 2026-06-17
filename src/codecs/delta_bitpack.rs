@@ -7,6 +7,14 @@
 //! the deltas are small and clustered, so FoR+bitpack squeezes them to a few
 //! bits. (Float bit patterns aren't delta-friendly across exponent bands, so it
 //! rarely wins on `f64` — like the other integer codecs.)
+//!
+//! Decode is a scalar prefix sum. A lane-parallel (FastLanes) prefix sum was
+//! tried and reverted: as a *separate* layer over [`super::for_bitpack`] it
+//! didn't beat the scalar version — the required untranspose / strided writes
+//! cancel the ILP gain (the unpack, not the add chain, is the larger cost). A
+//! real speedup needs the prefix sum *fused into* the bit-unpack kernel
+//! (FastLanes' `undelta_pack`), which is a `for_bitpack` rewrite, not done here;
+//! and delta decode (~1.5 GB/s) isn't the dominant bottleneck anyway.
 
 use crate::codecs::for_bitpack;
 use crate::error::Error;
@@ -32,15 +40,20 @@ pub(crate) fn encode(vals: &[u64]) -> Vec<u8> {
         deltas.push(zigzag(v.wrapping_sub(prev)));
         prev = v;
     }
-    out.extend_from_slice(&for_bitpack::encode(&deltas));
+    // Deltas are already zigzagged (unsigned magnitude), so FoR is unsigned.
+    out.extend_from_slice(&for_bitpack::encode(&deltas, false));
     out
 }
 
 pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
     let base = u64::from_le_bytes(
-        payload.get(0..8).ok_or(Error::Truncated)?.try_into().unwrap(),
+        payload
+            .get(0..8)
+            .ok_or(Error::Truncated)?
+            .try_into()
+            .unwrap(),
     );
-    let deltas = for_bitpack::decode(&payload[8..], n)?;
+    let deltas = for_bitpack::decode(&payload[8..], n, false)?;
     let mut out = Vec::with_capacity(n);
     let mut prev = base;
     for z in deltas {
@@ -67,7 +80,10 @@ mod tests {
             })
             .collect();
         let enc = encode(&vals);
-        assert!(enc.len() < vals.len() * 8 / 4, "monotonic ids should pack small");
+        assert!(
+            enc.len() < vals.len() * 8 / 4,
+            "monotonic ids should pack small"
+        );
         assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
 
         assert_eq!(decode(&encode(&[]), 0).unwrap(), Vec::<u64>::new());

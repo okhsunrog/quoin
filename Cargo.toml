@@ -9,14 +9,29 @@ readme = "README.md"
 keywords = ["compression", "floating-point", "simd", "lossless", "time-series"]
 categories = ["compression"]
 
+[workspace]
+members = ["vendor/pco"]
+
 [dependencies]
+# Vendored fork of pco (pcodec) — strong numeric backend, used as a competing
+# block mode at the higher levels. See vendor/pco/NOTICE for fork changes.
+pco = { path = "vendor/pco" }
+arrow-array = { version = "58", optional = true }
+arrow-buffer = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+bytes = { version = "1.11.1", optional = true }
+flate2 = { version = "1.1.9", optional = true }
+lz4_flex = { version = "0.13.1", optional = true }
 # Runtime CPU-feature dispatch / function multiversioning for the hot kernels.
 # Avoids the per-call overhead of `is_x86_feature_detected!` and generates
 # baseline / AVX2 / AVX-512 clones from a single attribute.
 multiversion = "0.8.0"
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd", "snap"], optional = true }
 # Block-parallel encode/decode; behind the default-on `parallel` feature.
 rayon = { version = "1.12.0", optional = true }
+vortex = { version = "0.75.0", default-features = false, features = ["files", "zstd"], optional = true }
 zstd = { version = "0.13.3", optional = true }
+zerocopy = "0.8.52"
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -26,15 +41,31 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# Optimized exactly like `release` but with full debug info, for profilers
+# (perf / VTune source-level attribution). Build/run with `--profile profiling`.
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [features]
 default = ["parallel"]
 # Block-parallel encode/decode via rayon. Off → single-threaded, no rayon dep.
 parallel = ["dep:rayon"]
 # Compare against zstd (vendored) in the bench harness.
 bench-zstd = ["dep:zstd"]
+# Compare against LZ4 (pure-Rust lz4_flex) in the bench harness.
+bench-lz4 = ["dep:lz4_flex"]
+# Compare against DEFLATE (flate2 / miniz_oxide) in the bench harness.
+bench-deflate = ["dep:flate2"]
 # Compare against the upstream C `fc` library, compiled and linked via FFI.
 # Point FC_SRC_DIR at the `fc` checkout (defaults to ../fc).
 bench-fc = []
+# Apache Arrow adapter: compress/decompress `arrow::Array` directly.
+arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-schema"]
+# Benchmark the Arrow adapter against Parquet (arrow-rs) on identical columns.
+bench-parquet = ["arrow", "dep:parquet", "dep:bytes"]
+# Benchmark the Arrow adapter against Vortex on identical columns.
+bench-vortex = ["arrow", "dep:vortex"]
 
 [build-dependencies]
 # Only used when the `bench-fc` feature is active; cheap enough to always pull.
@@ -45,3 +76,14 @@ cc = "1.2.64"
 [[bench]]
 name = "kernels"
 harness = false
+
+# These examples unconditionally use the Arrow adapter / external columnar formats,
+# so they only build when their feature is enabled (plain `cargo test` skips them).
+# `compare` and `pareto` are internally `cfg`-gated and need no declaration.
+[[example]]
+name = "vs_columnar"
+required-features = ["bench-parquet"]
+
+[[example]]
+name = "vs_vortex"
+required-features = ["bench-vortex"]

@@ -8,8 +8,8 @@
 //! Decoding is exact: encode verifies `decode(encode(v)) == v` bit-for-bit per
 //! value (else it's an exception), and the decoder recomputes the same product.
 //!
-//! Not yet implemented: ALP-RD (the "real doubles" split-dictionary scheme for
-//! non-decimal floats) — captured in `docs/LANDSCAPE.md` as a follow-up.
+//! Non-decimal real doubles are handled by [`super::alp_rd`], the ALP-RD
+//! split-dictionary scheme.
 
 use crate::bitpack::{self, BLOCK};
 use crate::error::Error;
@@ -49,7 +49,11 @@ fn decode_value(digit: i64, e: usize, f: usize) -> f64 {
 fn find_ef(sub: &[u64]) -> Option<(usize, usize)> {
     let n = sub.len();
     let stride = (n / 32).max(1);
-    let sample: Vec<f64> = (0..n).step_by(stride).take(32).map(|i| f64::from_bits(sub[i])).collect();
+    let sample: Vec<f64> = (0..n)
+        .step_by(stride)
+        .take(32)
+        .map(|i| f64::from_bits(sub[i]))
+        .collect();
 
     let mut best = (0usize, 0usize);
     let mut best_cost = usize::MAX;
@@ -129,7 +133,11 @@ fn encode_subblock(sub: &[u64], out: &mut Vec<u8>) -> Option<()> {
     let min = *digits.iter().min().unwrap();
     let max = *digits.iter().max().unwrap();
     let range = max.wrapping_sub(min) as u64;
-    let width = if range == 0 { 0 } else { 64 - range.leading_zeros() };
+    let width = if range == 0 {
+        0
+    } else {
+        64 - range.leading_zeros()
+    };
     if width > 32 {
         return None; // digits too spread for the u32 packer — ALP-RD territory
     }
@@ -170,11 +178,19 @@ pub(crate) fn decode(payload: &[u8], n_values: usize) -> Result<Vec<u64>, Error>
         if e > MAX_EXP || f > e {
             return Err(Error::CorruptPayload("alp exponent/factor"));
         }
-        let exc_count =
-            u16::from_le_bytes(payload.get(pos + 2..pos + 4).ok_or(Error::Truncated)?.try_into().unwrap())
-                as usize;
+        let exc_count = u16::from_le_bytes(
+            payload
+                .get(pos + 2..pos + 4)
+                .ok_or(Error::Truncated)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let min = i64::from_le_bytes(
-            payload.get(pos + 4..pos + 12).ok_or(Error::Truncated)?.try_into().unwrap(),
+            payload
+                .get(pos + 4..pos + 12)
+                .ok_or(Error::Truncated)?
+                .try_into()
+                .unwrap(),
         );
         let width = *payload.get(pos + 12).ok_or(Error::Truncated)?;
         pos += 13;
@@ -208,10 +224,18 @@ pub(crate) fn decode(payload: &[u8], n_values: usize) -> Result<Vec<u64>, Error>
         // Patch exceptions over the decoded digits.
         for _ in 0..exc_count {
             let p = u16::from_le_bytes(
-                payload.get(pos..pos + 2).ok_or(Error::Truncated)?.try_into().unwrap(),
+                payload
+                    .get(pos..pos + 2)
+                    .ok_or(Error::Truncated)?
+                    .try_into()
+                    .unwrap(),
             ) as usize;
             let bits = u64::from_le_bytes(
-                payload.get(pos + 2..pos + 10).ok_or(Error::Truncated)?.try_into().unwrap(),
+                payload
+                    .get(pos + 2..pos + 10)
+                    .ok_or(Error::Truncated)?
+                    .try_into()
+                    .unwrap(),
             );
             pos += 10;
             if p >= count {
@@ -237,14 +261,19 @@ mod tests {
     #[test]
     fn decimal_with_exceptions() {
         // cent-rounded prices with a few NaN/huge outliers → exceptions.
-        let mut v: Vec<u64> =
-            (0..5000).map(|i| (100.0_f64 + (i % 700) as f64 / 100.0).to_bits()).collect();
+        let mut v: Vec<u64> = (0..5000)
+            .map(|i| (100.0_f64 + (i % 700) as f64 / 100.0).to_bits())
+            .collect();
         v[10] = f64::NAN.to_bits();
         v[2000] = 1e300_f64.to_bits();
         v[4999] = f64::INFINITY.to_bits();
         roundtrip(&v);
 
-        roundtrip(&(0..3000).map(|i| ((i % 100) as f64 * 0.25).to_bits()).collect::<Vec<_>>());
+        roundtrip(
+            &(0..3000)
+                .map(|i| ((i % 100) as f64 * 0.25).to_bits())
+                .collect::<Vec<_>>(),
+        );
         roundtrip(&[]);
         roundtrip(&[1.25_f64.to_bits()]);
         roundtrip(&vec![0.0f64.to_bits(); 2000]);

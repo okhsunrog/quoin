@@ -1,7 +1,7 @@
 //! LZ: byte-level LZ77 over the block's little-endian bytes. Targets the
 //! repeating-value datasets (dictionaries, quantized levels, cent-rounded
 //! prices) where the predictors find little but whole values or byte runs
-//! recur. The token stream is entropy-coded by the caller (LZ + range/tANS,
+//! recur. The token stream is entropy-coded by the caller (LZ + range/rANS,
 //! analogous to zstd's LZ + FSE).
 //!
 //! LZSS framing: a control byte holds 8 flags (MSB-first); a 1 flag is a match
@@ -27,7 +27,7 @@ enum Token {
     Match { off: u32, len: u32 },
 }
 
-fn lz_compress(input: &[u8]) -> Vec<u8> {
+pub(crate) fn lz_compress(input: &[u8]) -> Vec<u8> {
     let n = input.len();
     let mut tokens: Vec<Token> = Vec::new();
     let mut head = vec![-1i64; HASH_SIZE];
@@ -44,16 +44,22 @@ fn lz_compress(input: &[u8]) -> Vec<u8> {
             let mut chain = MAX_CHAIN;
             while cand >= 0 && chain > 0 {
                 let c = cand as usize;
-                // Extend the match between positions c (earlier) and i.
-                let mut l = 0;
-                while l < max_len && input[c + l] == input[i + l] {
-                    l += 1;
-                }
-                if l > best_len {
-                    best_len = l;
-                    best_off = i - c;
-                    if l == max_len {
-                        break;
+                // Quick reject (zlib's trick): a candidate can only beat the
+                // current best if the byte at the `best_len` boundary matches.
+                // One compare skips the full scan for the vast majority of
+                // candidates — ratio-neutral, it finds the same best match.
+                if best_len == 0 || (c + best_len < n && input[c + best_len] == input[i + best_len])
+                {
+                    let mut l = 0;
+                    while l < max_len && input[c + l] == input[i + l] {
+                        l += 1;
+                    }
+                    if l > best_len {
+                        best_len = l;
+                        best_off = i - c;
+                        if l == max_len {
+                            break;
+                        }
                     }
                 }
                 cand = prev[c];
@@ -110,7 +116,7 @@ fn lz_compress(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn lz_decompress(stream: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn lz_decompress(stream: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
     let mut pos = 0usize;
     let n = varint::read_u64(stream, &mut pos)? as usize;
     if n != expected {

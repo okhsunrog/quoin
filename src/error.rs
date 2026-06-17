@@ -15,6 +15,13 @@ pub enum Error {
     CorruptPayload(&'static str),
     /// The decoded value count did not match the header.
     LengthMismatch { expected: usize, got: usize },
+    /// The header declares a column type this build does not implement.
+    UnsupportedDType(u8),
+    /// A type-specific decompress (e.g. [`crate::decompress`], which returns
+    /// `f64`) was called on a stream holding a different column type.
+    DTypeMismatch,
+    /// The Arrow adapter was given an array of a type it does not support yet.
+    UnsupportedArrowType,
 }
 
 impl fmt::Display for Error {
@@ -31,6 +38,11 @@ impl fmt::Display for Error {
                     "length mismatch: expected {expected} values, decoded {got}"
                 )
             }
+            Error::UnsupportedDType(d) => write!(f, "unsupported column type id {d}"),
+            Error::DTypeMismatch => {
+                write!(f, "stream column type does not match the requested type")
+            }
+            Error::UnsupportedArrowType => write!(f, "unsupported Arrow array type"),
         }
     }
 }
