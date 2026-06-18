@@ -232,8 +232,13 @@ single-threaded bulk APIs; quoin uses its default block-parallel (rayon) path.
 Reproduce with:
 
 ```bash
+# f64 (ALP corpus)
 cargo run --release --example bench_readme \
     --features bench-zstd,bench-lz4,bench-deflate > bench.csv
+# integers (ClickBench parquet) + Decimal128
+PARQUET_FILE=datasets/parquet/clickbench_hits_0.parquet \
+cargo run --release --example bench_typed \
+    --features bench-parquet,bench-zstd,bench-lz4,bench-deflate > typed.csv
 ```
 
 ### The ratio ⇄ speed tradeoff
@@ -286,6 +291,39 @@ quoin-Max wins the ratio on 6 of 8 real columns (often by a wide margin —
 on the other two (`poi_lat`, `food_prices`), all while decoding far faster. Where
 a column is genuinely high-entropy (`poi_lat` geo-coordinates), a generic LZ
 stage still has an edge — quoin is honest about that.
+
+### Integers & decimals — where type-awareness pays off most
+
+f64 is actually quoin's *hardest* case (mantissa bits are high-entropy). On
+**integers and decimals** the specialized lanes — frame-of-reference + bit-packing,
+delta cascades, the decimal container — pull much further ahead of byte-blind
+compressors. Integer columns are real `i64`/`i32` from the ClickBench `hits`
+dataset; decimal columns are real f64 values stored as fixed-point `Decimal128`
+(the "store prices/measurements as DECIMAL, not DOUBLE" case). Baselines compress
+the raw little-endian value bytes.
+
+![compression ratio on integer and decimal columns](docs/images/typed_ratio.png)
+
+| column | type | lz4 | zstd -3 | zstd -19 | quoin-Bal | quoin-Max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| EventTime (timestamp) | i64 | 2.1 | 4.6 | 5.1 | 5.7 | **8.4** |
+| UserID (clustered) | i64 | 9.8 | 12.4 | 12.6 | 10.9 | **14.6** |
+| WatchID (random) | i64 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
+| CounterID (low-card) | i32 | 254 | 9 950 | 10 444 | 780 | **19 231** |
+| RegionID | i32 | 12.1 | 20.1 | **29.5** | 19.4 | 28.7 |
+| IPNetworkID | i32 | 8.4 | 12.5 | 13.8 | 10.4 | **13.9** |
+| food_prices | dec128 | 5.6 | 8.9 | 10.8 | 8.8 | **12.9** |
+| city_temperature | dec128 | 5.4 | 12.0 | 14.3 | 13.3 | **17.4** |
+| bitcoin_tx | dec128 | 3.4 | 4.5 | 5.7 | 5.3 | **6.5** |
+
+Takeaways: quoin-Max takes the best ratio on **every decimal column** and most
+integer columns; it ties everyone at ~1.0× on genuinely random IDs (`WatchID` —
+nothing compresses that), and `zstd -19` edges it on one structured i32
+(`RegionID`). The bigger story is the **speed gap at equal-or-better ratio**: on
+`city_temperature` decimals quoin-Balanced reaches 13.3× at **121 MB/s** compress,
+versus `zstd -19`'s 14.3× at **2.3 MB/s** — ~50× faster encode for a comparable
+ratio, and quoin-Max then beats it outright. The relative speed advantage is the
+same one f64 shows, but the absolute ratios are far higher.
 
 ## Performance: SIMD, multiversion, rayon
 

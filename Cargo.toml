@@ -89,5 +89,9 @@ name = "real_parquet"
 required-features = ["bench-parquet"]
 
 [[example]]
+name = "bench_typed"
+required-features = ["bench-parquet", "bench-zstd", "bench-lz4", "bench-deflate"]
+
+[[example]]
 name = "vs_vortex"
 required-features = ["bench-vortex"]

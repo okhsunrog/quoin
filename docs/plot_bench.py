@@ -139,3 +139,53 @@ fig2.update_layout(
 )
 fig2.write_image(f"{OUT}/ratio_breadth.png", scale=2)
 print("wrote ratio_breadth.png")
+
+
+# ----------------------------------------------------------------------------
+# Figure 3 — Integer & Decimal lanes (typed CSV from bench_typed.rs).
+# Two panels: real ClickBench integer columns | real-derived Decimal128 columns.
+# Grouped bars, linear ratio. Excludes the incompressible / outlier columns
+# (WatchID ~1×, CounterID ~19000×) — those live in the table instead.
+# ----------------------------------------------------------------------------
+TYPED = sys.argv[3] if len(sys.argv) > 3 else "/tmp/quoin_typed.csv"
+try:
+    td = pd.read_csv(TYPED)
+except FileNotFoundError:
+    td = None
+
+if td is not None:
+    int_cols = ["EventTime", "UserID", "RegionID", "IPNetworkID"]
+    dec_cols = ["food_prices", "city_temperature", "bitcoin_tx"]
+    bars = ["lz4", "zstd-3", "zstd-19", "quoin-balanced", "quoin-max"]
+    fig3 = make_subplots(
+        rows=1, cols=2, horizontal_spacing=0.09,
+        subplot_titles=("<b>Integer columns</b>  ·  real ClickBench i64 / i32",
+                        "<b>Decimal128 columns</b>  ·  real values as fixed-point"),
+    )
+    def add_panel(cols, col_i, showleg):
+        labels = [c.replace("_", " ") for c in cols]
+        for codec in bars:
+            vals = []
+            for d in cols:
+                s = td[(td.section == d) & (td.codec == codec)]
+                vals.append(float(s.ratio.iloc[0]) if not s.empty else None)
+            fig3.add_trace(go.Bar(
+                name=NAME[codec], x=labels, y=vals, marker_color=COL[codec],
+                marker_line_width=0, legendgroup=codec, showlegend=showleg,
+                hovertemplate=f"{NAME[codec]}<br>%{{x}}<br>%{{y:.1f}}×<extra></extra>",
+            ), row=1, col=col_i)
+    add_panel(int_cols, 1, True)
+    add_panel(dec_cols, 2, False)
+    fig3.update_layout(
+        template="plotly_white", font=FONT, barmode="group", bargap=0.3, bargroupgap=0.06,
+        title=dict(text="<b>Type-aware lanes: ratio on integers & decimals</b>"
+                        "<br><sup>where quoin's specialization pays off most · higher is better</sup>",
+                   x=0.5, xanchor="center", font=dict(size=20)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        width=1280, height=560, margin=dict(t=120, b=70, l=60, r=30),
+        plot_bgcolor="white", paper_bgcolor="white",
+    )
+    fig3.update_yaxes(title_text="compression ratio  ×", gridcolor="#eef2f7", zeroline=False, row=1, col=1)
+    fig3.update_yaxes(gridcolor="#eef2f7", zeroline=False, row=1, col=2)
+    fig3.write_image(f"{OUT}/typed_ratio.png", scale=2)
+    print("wrote typed_ratio.png")
