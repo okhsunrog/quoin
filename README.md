@@ -18,9 +18,11 @@ and delta cascades for integers, ALP / ALP-RD and a numeric latent backend for
 floats and decimals — instead of treating every column as an opaque byte stream
 the way a general LZ compressor does.
 
-The payoff: on real f64 columns quoin typically lands a **better compression
-ratio than `zstd -19` while compressing ~100× faster and decompressing 2–10×
-faster**, and it decodes several GB/s.
+The payoff (single-threaded, see [Benchmarks](#benchmarks)): on real f64 columns
+quoin typically lands a **better compression ratio than `zstd -19` while
+compressing ~30× faster and decompressing 2–5× faster than zstd/zlib**. Its win is
+ratio + decode speed; encode is a deliberate level tradeoff (the per-block codec
+search is CPU-heavy, so fast LZ codecs out-encode it at a far worse ratio).
 
 ```rust
 use quoin::{compress, decompress, Config};
@@ -294,12 +296,12 @@ columns truncate the same data to show ratio is size-stable):
 
 | codec | ratio | compress MB/s | decompress MB/s | ratio @100 K | ratio @1 M |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| quoin (Fastest) | 1.17 | 496 | 1144 | 1.18 | 1.17 |
+| quoin (Fastest) | 1.17 | **496** | 1144 | 1.18 | 1.17 |
 | quoin (Fast) | 2.52 | 78 | **1594** | 2.47 | 2.51 |
 | **quoin (Balanced)** | **2.53** | 67 | 1580 | 2.55 | 2.52 |
 | quoin (High) | 2.72 | 22 | 820 | 2.72 | 2.71 |
 | **quoin (Max)** | **2.72** | 9 | 750 | 2.72 | 2.71 |
-| lz4 | 1.35 | **326** | 1577 | 1.32 | 1.34 |
+| lz4 | 1.35 | 326 | 1577 | 1.32 | 1.34 |
 | zlib -6 | 1.95 | 32 | 305 | 1.91 | 1.94 |
 | zstd -3 | 1.89 | 172 | 633 | 1.86 | 1.88 |
 | zstd -19 | 2.20 | 2.4 | 591 | 2.17 | 2.19 |
@@ -352,14 +354,28 @@ the raw little-endian value bytes.
 | city_temperature | dec128 | 5.4 | 12.0 | 14.3 | 13.3 | **17.4** |
 | bitcoin_tx | dec128 | 3.4 | 4.5 | 5.7 | 5.3 | **6.5** |
 
-Takeaways: quoin-Max takes the best ratio on **every decimal column** and most
-integer columns; it ties everyone at ~1.0× on genuinely random IDs (`WatchID` —
-nothing compresses that), and `zstd -19` edges it on one structured i32
-(`RegionID`). Single-threaded, quoin's win is **ratio + decode speed**: on
-`city_temperature` decimals quoin-Balanced reaches 13.3× decoding at ~2 GB/s, and
-quoin-Max pushes to 17.4× — above `zstd -19`'s 14.3×. The same caveat as the floats
-applies on encode: the codec search is CPU-heavy, so the fast LZ baselines encode
-quicker (at far lower ratio) while quoin still encodes well ahead of `zstd -19`.
+quoin-Max takes the best ratio on **every decimal column** and most integer
+columns; it ties everyone at ~1.0× on genuinely random IDs (`WatchID` — nothing
+compresses that), and `zstd -19` edges it on one structured i32 (`RegionID`).
+
+Decode throughput (MB/s, single-threaded) — the axis where quoin competes with even
+lz4:
+
+| column | type | lz4 | quoin-Fastest | quoin-Bal | quoin-Max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| EventTime | i64 | 1105 | **1926** | 1007 | 1335 |
+| UserID | i64 | 1052 | 2149 | **3084** | 1731 |
+| RegionID | i32 | **1754** | 988 | 382 | 763 |
+| city_temperature | dec128 | **5040** | 3596 | 1952 | 708 |
+| bitcoin_tx | dec128 | 4966 | **5477** | 2414 | 3916 |
+
+On the delta-friendly integers (`EventTime`, `UserID`) quoin-Max decodes **faster
+than lz4** while compressing 4–8× better. On pure bit-packed `RegionID` and the
+smoothest decimals, lz4's memcpy-style decode is faster — but at lz4's far worse
+ratio (`RegionID` 12× vs quoin's 29×), and quoin-Fastest stays in the same decode
+class. Encode is the deliberate tradeoff: the codec search is CPU-heavy, so the fast
+LZ baselines encode quicker (at far lower ratio) while quoin still out-encodes
+`zstd -19`.
 
 ## Performance: SIMD, multiversion, rayon
 
