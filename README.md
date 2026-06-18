@@ -1,5 +1,7 @@
 # quoin
 
+📖 [Русская версия](README.ru.md)
+
 **A lossless, type-aware compressor for columns of numbers — written in safe
 Rust, built on the Apache Arrow data model.**
 
