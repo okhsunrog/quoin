@@ -85,7 +85,10 @@ fn col_owned(c: ColumnRef) -> Column {
 }
 
 fn run_int(label: &str, dtype: &str, n: usize, col: ColumnRef, orig: usize, bytes: &[u8], trials: usize) {
+    emit(label, dtype, n, "quoin-fastest", bench_quoin(col, orig, Level::Fastest, trials));
+    emit(label, dtype, n, "quoin-fast", bench_quoin(col, orig, Level::Fast, trials));
     emit(label, dtype, n, "quoin-balanced", bench_quoin(col, orig, Level::Balanced, trials));
+    emit(label, dtype, n, "quoin-high", bench_quoin(col, orig, Level::High, trials));
     emit(label, dtype, n, "quoin-max", bench_quoin(col, orig, Level::Max, trials));
     emit(label, dtype, n, "lz4", bench_lz4(bytes, trials));
     emit(label, dtype, n, "zlib-6", bench_zlib(bytes, 6, trials));

@@ -225,11 +225,14 @@ How that compares to **Parquet** as a compression layer:
 ## Benchmarks
 
 Measured on an Intel Core Ultra 5 125H, stable Rust release build (no
-`target-cpu=native`), against real `f64` columns from the **ALP benchmark
-corpus**. Ratio = original ÷ compressed (higher is better); throughput in MB/s of
-*uncompressed* data (median of 3 trials). Baselines (`lz4`, `zlib`, `zstd`) are
-single-threaded bulk APIs; quoin uses its default block-parallel (rayon) path.
-Reproduce with:
+`target-cpu=native`), **pinned to the 4 performance cores** (`taskset -c 0-7`,
+`RAYON_NUM_THREADS=8`) so the numbers are stable and don't drift onto the E-cores.
+Integer columns are real `i64`/`i32` from the ClickBench `hits` dataset; float
+columns are the **ALP benchmark corpus**; decimal columns are real f64 values
+stored as fixed-point `Decimal128`. Ratio = original ÷ compressed (higher is
+better); throughput in MB/s of *uncompressed* data (median of 3 trials). Baselines
+(`lz4`, `zlib`, `zstd`) are single-threaded bulk APIs; quoin uses its default
+block-parallel (rayon) path. Reproduce with:
 
 ```bash
 # f64 (ALP corpus)
@@ -251,19 +254,19 @@ hardest case).
 
 **Integers** — quoin-Balanced lands top-right on *both* axes (higher ratio *and*
 faster than every baseline); quoin-Max stretches the ratio to 8.4×, while
-`zstd -19` only reaches 5.1× by collapsing to 1.8 MB/s compress:
+`zstd -19` only reaches 5.1× by collapsing to 3.3 MB/s compress:
 
 ![integer columns: ratio vs speed](docs/images/pareto_int.png)
 
 **Decimals** — quoin-Max takes the best ratio (17.4× vs `zstd -19`'s 14.3×) at
-~20× the encode speed; quoin-Balanced trades a hair of ratio for ~50× faster
+~15× the encode speed; quoin-Balanced trades a hair of ratio for ~40× faster
 encode and the fastest decode:
 
 ![decimal columns: ratio vs speed](docs/images/pareto_decimal.png)
 
 **Floats** — the narrowest gap (mantissa bits are high-entropy), yet quoin still
 sits top-right: quoin-Balanced beats `zstd -19`'s ratio (2.53 vs 2.20) while
-compressing **~210× faster** and decompressing **~2.4× faster**:
+compressing **~145× faster** and decompressing **~3.6× faster**:
 
 ![float columns: ratio vs speed](docs/images/pareto_float.png)
 
@@ -272,13 +275,15 @@ columns truncate the same data to show ratio is size-stable):
 
 | codec | ratio | compress MB/s | decompress MB/s | ratio @100 K | ratio @1 M |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| **quoin (Balanced)** | **2.53** | 341 | **1396** | 2.55 | 2.52 |
-| quoin (High) | 2.72 | 99 | 994 | 2.72 | 2.71 |
-| **quoin (Max)** | **2.72** | 42 | 999 | 2.72 | 2.71 |
-| lz4 | 1.35 | 246 | 1569 | 1.32 | 1.34 |
-| zlib -6 | 1.95 | 26 | 277 | 1.91 | 1.94 |
-| zstd -3 | 1.89 | 119 | 559 | 1.86 | 1.88 |
-| zstd -19 | 2.20 | **1.6** | 581 | 2.17 | 2.19 |
+| quoin (Fastest) | 1.17 | **1561** | 2575 | 1.18 | 1.17 |
+| quoin (Fast) | 2.52 | 387 | 2572 | 2.47 | 2.51 |
+| **quoin (Balanced)** | **2.53** | 352 | **2607** | 2.55 | 2.52 |
+| quoin (High) | 2.72 | 114 | 2012 | 2.72 | 2.71 |
+| **quoin (Max)** | **2.72** | 45 | 1976 | 2.72 | 2.71 |
+| lz4 | 1.35 | 363 | 1856 | 1.32 | 1.34 |
+| zlib -6 | 1.95 | 40 | 360 | 1.91 | 1.94 |
+| zstd -3 | 1.89 | 201 | 738 | 1.86 | 1.88 |
+| zstd -19 | 2.20 | **2.4** | 730 | 2.17 | 2.19 |
 
 ### Ratio across real columns
 
@@ -332,8 +337,8 @@ Takeaways: quoin-Max takes the best ratio on **every decimal column** and most
 integer columns; it ties everyone at ~1.0× on genuinely random IDs (`WatchID` —
 nothing compresses that), and `zstd -19` edges it on one structured i32
 (`RegionID`). The bigger story is the **speed gap at equal-or-better ratio**: on
-`city_temperature` decimals quoin-Balanced reaches 13.3× at **121 MB/s** compress,
-versus `zstd -19`'s 14.3× at **2.3 MB/s** — ~50× faster encode for a comparable
+`city_temperature` decimals quoin-Balanced reaches 13.3× at **134 MB/s** compress,
+versus `zstd -19`'s 14.3× at **3.2 MB/s** — ~40× faster encode for a comparable
 ratio, and quoin-Max then beats it outright. The relative speed advantage is the
 same one f64 shows, but the absolute ratios are far higher.
 

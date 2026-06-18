@@ -21,14 +21,17 @@ df = pd.read_csv(BENCH)
 td = pd.read_csv(TYPED)
 
 COL = {
-    "quoin-balanced": "#10b981", "quoin-max": "#065f46",
+    "quoin-fastest": "#6ee7b7", "quoin-fast": "#34d399", "quoin-balanced": "#10b981",
+    "quoin-high": "#047857", "quoin-max": "#064e3b",
     "lz4": "#94a3b8", "zlib-6": "#f472b6", "zstd-3": "#fbbf24", "zstd-19": "#fb923c",
 }
 NAME = {
-    "quoin-balanced": "quoin · Balanced", "quoin-max": "quoin · Max",
+    "quoin-fastest": "quoin · Fastest", "quoin-fast": "quoin · Fast",
+    "quoin-balanced": "quoin · Balanced", "quoin-high": "quoin · High", "quoin-max": "quoin · Max",
     "lz4": "lz4", "zlib-6": "zlib −6", "zstd-3": "zstd −3", "zstd-19": "zstd −19",
 }
-PARETO = ["lz4", "zlib-6", "zstd-3", "zstd-19", "quoin-balanced", "quoin-max"]
+PARETO = ["lz4", "zlib-6", "zstd-3", "zstd-19",
+          "quoin-fastest", "quoin-fast", "quoin-balanced", "quoin-high", "quoin-max"]
 FONT = dict(family="Inter, Segoe UI, Helvetica, Arial, sans-serif", size=15, color="#1e293b")
 
 
@@ -60,12 +63,11 @@ def make_pareto(sub, headline, subtitle, fname):
             is_q = codec.startswith("quoin")
             fig.add_trace(go.Scatter(
                 x=[float(r.ratio.iloc[0])], y=[float(r[metric].iloc[0])],
-                mode="markers+text", text=[f" {NAME[codec]}"], textposition="middle right",
-                textfont=dict(size=12.5, color=COL[codec], family="Inter, Segoe UI, sans-serif"),
+                mode="markers", name=NAME[codec], legendgroup=codec, showlegend=(col_i == 1),
                 marker=dict(size=20 if is_q else 14, color=COL[codec],
                             line=dict(width=1.5, color="white"),
                             symbol="circle" if is_q else "diamond"),
-                showlegend=False, cliponaxis=False,
+                cliponaxis=False,
                 hovertemplate=f"{NAME[codec]}<br>ratio %{{x:.2f}}×<br>%{{y:.0f}} MB/s<extra></extra>",
             ), row=1, col=col_i)
         tv, tt = log_ticks(sub[metric].min(), sub[metric].max())
@@ -73,12 +75,14 @@ def make_pareto(sub, headline, subtitle, fname):
                          title_text="throughput  (MB/s, higher ↑ better)" if col_i == 1 else "",
                          gridcolor="#eef2f7", zeroline=False)
         fig.update_xaxes(row=1, col=col_i, title_text="compression ratio  (higher → better)",
-                         range=[rmin * 0.85, rmax * 1.18], gridcolor="#eef2f7", zeroline=False)
+                         range=[rmin * 0.88, rmax * 1.08], gridcolor="#eef2f7", zeroline=False)
     fig.update_layout(
         template="plotly_white", font=FONT,
         title=dict(text=f"<b>{headline}</b><br><sup>{subtitle}</sup>",
                    x=0.5, xanchor="center", font=dict(size=20)),
-        width=1280, height=520, margin=dict(t=110, b=70, l=80, r=40),
+        legend=dict(orientation="h", yanchor="top", y=-0.17, xanchor="center", x=0.5,
+                    font=dict(size=12)),
+        width=1280, height=560, margin=dict(t=110, b=110, l=80, r=40),
         plot_bgcolor="white", paper_bgcolor="white",
     )
     fig.write_image(f"{OUT}/{fname}", scale=2)

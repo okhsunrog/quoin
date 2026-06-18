@@ -106,6 +106,8 @@ fn run_codecs(label: &str, n: usize, data: &[f64], trials: usize) {
     let emit = |codec: &str, r: Row| {
         println!("{label},{n},{codec},{:.4},{:.1},{:.1},{}", r.ratio, r.enc_mbps, r.dec_mbps, r.ok as u8);
     };
+    emit("quoin-fastest", bench_quoin(data, Level::Fastest, trials));
+    emit("quoin-fast", bench_quoin(data, Level::Fast, trials));
     emit("quoin-balanced", bench_quoin(data, Level::Balanced, trials));
     emit("quoin-high", bench_quoin(data, Level::High, trials));
     emit("quoin-max", bench_quoin(data, Level::Max, trials));
