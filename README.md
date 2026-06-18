@@ -243,12 +243,11 @@ cargo run --release --example bench_typed \
 
 ### The ratio ⇄ speed tradeoff, per data type
 
-The whole point of a type-aware codec is to escape the usual "pick ratio *or*
-speed" tradeoff. In each plot every codec is one point — **top-right is best**
-(high ratio, high throughput) — with compression speed on the left and
-decompression speed on the right. The charts are ordered by how dramatic quoin's
-advantage is: **integers and decimals first** (where the specialized lanes pull
-furthest ahead), **floats last** (quoin's hardest case).
+Each codec is one point — **top-right is best** (high ratio, high throughput) —
+with compression speed on the left and decompression speed on the right. The
+charts are ordered by how dramatic quoin's advantage is: **integers and decimals
+first** (where the specialized lanes pull furthest ahead), **floats last** (quoin's
+hardest case).
 
 **Integers** — quoin-Balanced lands top-right on *both* axes (higher ratio *and*
 faster than every baseline); quoin-Max stretches the ratio to 8.4×, while
