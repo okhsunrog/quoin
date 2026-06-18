@@ -97,12 +97,16 @@ fn penalty(mode: Mode, lambda: u64, decoded_bytes: usize) -> usize {
 }
 
 /// Tracks the smallest-scoring candidate (`size + decode penalty`) for a block.
+/// Also remembers the runner-up *mode* so the LZ cascade (applied post-competition,
+/// see `encode_block_full`) can be tried on the top two, not just the winner.
 struct Best {
     mode: Mode,
     payload: Vec<u8>,
     score: usize,
     lambda: u64,
     decoded_bytes: usize,
+    runner_mode: Option<Mode>,
+    runner_score: usize,
 }
 
 impl Best {
@@ -114,15 +118,23 @@ impl Best {
             score,
             lambda,
             decoded_bytes,
+            runner_mode: None,
+            runner_score: usize::MAX,
         }
     }
 
     fn consider(&mut self, mode: Mode, payload: Vec<u8>) {
         let score = payload.len() + penalty(mode, self.lambda, self.decoded_bytes);
         if score < self.score {
+            // Demote the old winner to runner-up so the cascade still sees it.
+            self.runner_mode = Some(self.mode);
+            self.runner_score = self.score;
             self.mode = mode;
             self.payload = payload;
             self.score = score;
+        } else if score < self.runner_score && mode != self.mode {
+            self.runner_mode = Some(mode);
+            self.runner_score = score;
         }
     }
 }
@@ -248,7 +260,12 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
     let predictors = level.allows_predictors();
     let reduced = level.reduced_pool();
     let lambda = level.lambda();
-    let allow_lz = level.allows_lz_cascade();
+    // The LZ-over-residual cascade is the dominant encode cost at `Max` (~58% in
+    // profiles) because it ran *inside every candidate's* `code_residuals`. Run the
+    // base competition LZ-free, pick the winner by its entropy-coded size, then
+    // apply the cascade to that one winner below — turning ~8 LZ passes into 1.
+    let cascade_lz = level.allows_lz_cascade();
+    let allow_lz = false;
     let decoded_bytes = block.len() * dtype.lane_bytes();
     let raw_bytes = block.len() * 8;
     let feats = probe_block_features(block);
@@ -422,6 +439,23 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
         best.consider(Mode::Pco, p);
     }
 
+    // Apply the LZ cascade to the top-2 base candidates (winner + runner-up).
+    // `encode_mode` re-encodes a single mode with `allow_lz` on (from `level`), so
+    // its `code_residuals` runs the cascade; `consider` keeps it only if strictly
+    // smaller. Top-2 (not just top-1) covers the case where a base-runner-up wins
+    // *after* its own cascade — top-1 alone cost ~0.3% on one decimal column. Only
+    // modes that actually cascade LZ are re-encoded (skip re-running pco/ALP/etc.,
+    // which would just repeat heavy work for no cascade).
+    if cascade_lz {
+        for m in [Some(best.mode), best.runner_mode].into_iter().flatten() {
+            if mode_cascades_lz(m)
+                && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level)
+            {
+                best.consider(m, p);
+            }
+        }
+    }
+
     crate::diag::record_win(best.mode.id());
     frame_bytes(best.mode, block.len(), &best.payload)
 }
@@ -479,6 +513,25 @@ fn build_sample(block: &[u64]) -> Vec<u64> {
 /// Produce a mode's payload for `block`, or `None` if the mode doesn't apply.
 /// Centralized encode dispatch used by the sample path (and to encode the
 /// winner in full).
+/// Whether a mode's `encode_mode` path runs the LZ-over-residual cascade (i.e. its
+/// `code_residuals` sees `allow_lz`). Only these are worth re-encoding when the
+/// cascade is applied post-competition; the rest (RAW/pco/ALP/bitpack/…) don't
+/// cascade, so re-running them would just repeat work.
+fn mode_cascades_lz(mode: Mode) -> bool {
+    matches!(
+        mode,
+        Mode::PredRc
+            | Mode::Pred2
+            | Mode::Delta2
+            | Mode::DeltaDp
+            | Mode::OrderedDelta
+            | Mode::FloatMult
+            | Mode::Lz
+            | Mode::ByteTranspose
+            | Mode::Dict
+    )
+}
+
 fn encode_mode(
     mode: Mode,
     block: &[u64],
