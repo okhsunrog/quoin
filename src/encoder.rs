@@ -12,7 +12,7 @@ use crate::codecs::{
     pred, raw, rle, stride, transpose, xorz,
 };
 use crate::dtype::{DType, Family};
-use crate::entropy::code_residuals;
+use crate::entropy::{code_residuals, estimate_order1_bytes};
 use crate::format::{FRAME_HEADER_LEN, Header};
 use crate::mode::Mode;
 use crate::{Config, Level, Selection};
@@ -254,6 +254,24 @@ fn encode_block(
     }
 }
 
+/// `code_residuals`, but skip the (expensive) full range coding when an order-1
+/// entropy estimate shows the residual can't beat the incumbent `best_score` —
+/// even optimistically (estimate × 0.9). Active only at λ==0 (High/Max), the
+/// levels that range-code every candidate (~55% of Max encode after the LZ
+/// decouple); at faster levels `entropy_pick` already uses cheap rANS. Relies on
+/// the cheap strong modes (bitpack/ALP) running first so `best_score` is tight.
+fn coded_if_competitive(
+    res: &[u8],
+    lambda: u64,
+    allow_lz: bool,
+    best_score: usize,
+) -> Option<Vec<u8>> {
+    if lambda == 0 && estimate_order1_bytes(res).saturating_mul(9) / 10 >= best_score {
+        return None;
+    }
+    Some(code_residuals(res, lambda, allow_lz))
+}
+
 fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Level) -> Vec<u8> {
     let family = dtype.family();
     let entropy = level.allows_entropy();
@@ -299,81 +317,81 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
         best.consider(Mode::Xorz, xorz::encode(block));
     }
 
-    // The sequential PREDICTORS (FCM/DFCM, polynomial-float, 2nd-order int) live
-    // at `High`/`Max` only: they give the best ratio on smooth/structured data but
-    // decode as a non-vectorizable recurrence, so `Balanced` (fast decode) skips
-    // them even though its entropy coder is on.
-
-    // FCM predictor (a full hash pass per value); its payoff is the entropy-coded
-    // PRED_RC.
-    if predictors {
-        let fcm_res = pred::encode(block, predictor_log2);
-        if looks_compressible(fcm_res.len(), raw_bytes) {
-            best.consider(Mode::PredRc, code_residuals(&fcm_res, lambda, allow_lz));
-        }
-        best.consider(Mode::Pred, fcm_res);
-    }
-
-    // DFCM predictor: wins on smooth/ramp data where FCM's exact-repeat prediction
-    // fails but the deltas are predictable.
-    if predictors {
-        let dfcm_res = pred::dfcm_encode(block, predictor_log2);
-        if looks_compressible(dfcm_res.len(), raw_bytes) {
-            best.consider(Mode::Pred2, code_residuals(&dfcm_res, lambda, allow_lz));
-        }
-    }
-
-    // Float polynomial predictor (Newton forward-difference extrapolation): wins
-    // on smooth signals (sensors, audio, climate) where integer-delta predictors
-    // fail at zero crossings. The order (linear..cubic) is chosen per block by a
-    // finite-difference probe, so finely-sampled / curved data gets a sharper
-    // prediction while noise backs off to a low order. Float-only.
-    if family == Family::Float && predictors {
-        let order = linear::select_order(block);
-        let lin2_res = linear::encode(block, order);
-        if looks_compressible(lin2_res.len(), raw_bytes) {
-            best.consider(Mode::Delta2, code_residuals(&lin2_res, lambda, allow_lz));
-
-            // DELTA_DP: exact float residual of the same predictor. Wins big on
-            // polynomial/smooth data (constant difference); self-bails via `None`
-            // when float subtraction isn't exactly invertible.
-            if let Some(dp_res) = linear::dp_encode(block, order) {
-                best.consider(Mode::DeltaDp, code_residuals(&dp_res, lambda, allow_lz));
-            }
-        }
-    }
-
-    // Second-order integer delta: wins on monotone/polynomial data (ramps,
-    // parabola) where the bit-pattern second difference is near-constant.
-    if predictors {
-        let idelta2_res = linear::idelta2_encode(block);
-        if looks_compressible(idelta2_res.len(), raw_bytes) {
-            best.consider(Mode::OrderedDelta, code_residuals(&idelta2_res, lambda, allow_lz));
-        }
-    }
-
-    let block_compressible = looks_compressible(best.payload.len(), raw_bytes);
-
-    // FLOAT_MULT / ALP compress via decimal *value*, not predictability, so they
-    // are tried regardless of `block_compressible` (random decimals defeat the
-    // predictors but pack fine as scaled integers). Both self-bail cheaply on
-    // non-decimal data. Float-only: they reinterpret the lane as `f64`. ALP is
-    // pure bit-packing (no entropy coder), so it survives the fast levels.
+    // Cheap, strong baseline modes run FIRST so `best` is tight *before* the
+    // expensive predictors. That lets the order-1 estimate gate below skip range-
+    // coding predictors that can't win. Ordering never changes the winner —
+    // `consider` keeps the smallest over all modes regardless — it only changes
+    // which candidates the gate can prune.
+    //
+    // FoR+bitpack / delta+bitpack: pure bit-packing, cheap, tight baseline on
+    // bounded-range / monotonic integers. Unconditional (must not hang off
+    // `block_compressible`, which would be false at `Fastest`).
+    best.consider(Mode::ForBitpack, for_bitpack::encode(block, dtype.signed()));
+    best.consider(Mode::DeltaBitpack, delta_bitpack::encode(block));
+    // FLOAT_MULT / ALP / ALP-RD compress via decimal *value*, not predictability:
+    // cheap (bit-packing, no entropy coder) and a tight baseline on decimal-origin
+    // floats. Tried regardless of compressibility; self-bail on non-decimal data.
     if family == Family::Float && !reduced {
-        // FLOAT_MULT now self-codes its `k` stream (bit-pack or entropy), so it
-        // competes at the fast levels too, not only when the entropy coder is on.
         if let Some(p) = float_mult::encode(block, entropy, lambda, allow_lz) {
             best.consider(Mode::FloatMult, p);
         }
         if let Some(p) = alp::encode(block) {
             best.consider(Mode::Alp, p);
         }
-        // ALP-RD: real-double split-dictionary. Pure bit-packing (no entropy),
-        // so it survives the fast levels; self-bails on non-real-double data.
         if let Some(p) = alp_rd::encode(block) {
             best.consider(Mode::AlpRd, p);
         }
     }
+
+    // The sequential PREDICTORS (FCM/DFCM, polynomial-float, 2nd-order int) live at
+    // `High`/`Max` only: best ratio on smooth/structured data, but a non-
+    // vectorizable decode recurrence, so `Balanced` skips them. They are the
+    // dominant encode cost (range coding per candidate), so each residual goes
+    // through `coded_if_competitive`: an order-1 entropy estimate skips the full
+    // range-code when it can't beat the (now tight) incumbent.
+    if predictors {
+        let fcm_res = pred::encode(block, predictor_log2);
+        if looks_compressible(fcm_res.len(), raw_bytes)
+            && let Some(p) = coded_if_competitive(&fcm_res, lambda, allow_lz, best.score)
+        {
+            best.consider(Mode::PredRc, p);
+        }
+        best.consider(Mode::Pred, fcm_res);
+    }
+    if predictors {
+        let dfcm_res = pred::dfcm_encode(block, predictor_log2);
+        if looks_compressible(dfcm_res.len(), raw_bytes)
+            && let Some(p) = coded_if_competitive(&dfcm_res, lambda, allow_lz, best.score)
+        {
+            best.consider(Mode::Pred2, p);
+        }
+    }
+    if family == Family::Float && predictors {
+        let order = linear::select_order(block);
+        let lin2_res = linear::encode(block, order);
+        if looks_compressible(lin2_res.len(), raw_bytes) {
+            if let Some(p) = coded_if_competitive(&lin2_res, lambda, allow_lz, best.score) {
+                best.consider(Mode::Delta2, p);
+            }
+            // DELTA_DP: exact float residual of the same predictor; self-bails via
+            // `None` when float subtraction isn't exactly invertible.
+            if let Some(dp_res) = linear::dp_encode(block, order)
+                && let Some(p) = coded_if_competitive(&dp_res, lambda, allow_lz, best.score)
+            {
+                best.consider(Mode::DeltaDp, p);
+            }
+        }
+    }
+    if predictors {
+        let idelta2_res = linear::idelta2_encode(block);
+        if looks_compressible(idelta2_res.len(), raw_bytes)
+            && let Some(p) = coded_if_competitive(&idelta2_res, lambda, allow_lz, best.score)
+        {
+            best.consider(Mode::OrderedDelta, p);
+        }
+    }
+
+    let block_compressible = looks_compressible(best.payload.len(), raw_bytes);
 
     // LZ: only worth its match finder + entropy pass on low-distinct or
     // repetitive data (dictionaries, quantized levels, cent-rounded prices).
@@ -396,24 +414,14 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
     if entropy
         && block_compressible
         && (feats.exp_range <= TRANSPOSE_EXP_LIMIT || feats.looks_like_repeats)
+        && let Some(p) = coded_if_competitive(&transpose::encode(block), lambda, allow_lz, best.score)
     {
-        best.consider(
-            Mode::ByteTranspose,
-            code_residuals(&transpose::encode(block), lambda, allow_lz),
-        );
+        best.consider(Mode::ByteTranspose, p);
     }
 
-    // Integer-column codecs: FoR+bitpack (bounded-range) and delta+bitpack
-    // (monotonic / regularly-stepped). Pure bit-packing — random-access and
-    // available at every level. Rarely win on f64 bit patterns but cheap to try.
-    // FoR+bitpack (bounded-range) and delta+bitpack (monotonic / regularly
-    // stepped) are the cheap random-access workhorses: always tried, at every
-    // level. They self-bail to ~raw when they can't help, so `Best` just keeps
-    // the incumbent — they must NOT hang off `block_compressible` (which is set
-    // by the entropy modes and so is false at `Fastest`, where these are the
-    // only codecs that can win an integer column).
-    best.consider(Mode::ForBitpack, for_bitpack::encode(block, dtype.signed()));
-    best.consider(Mode::DeltaBitpack, delta_bitpack::encode(block));
+    // (FoR+bitpack and delta+bitpack ran up front, before the predictors, so the
+    // estimate gate could prune against their tight baseline.)
+
     // Dictionary (scattered low-cardinality) and RLE (grouped runs); both
     // self-bail on high-distinct / run-poor data. Pure bit-packing, but a hash
     // pass / run scan, so they sit out of the minimal `Fastest` pool.

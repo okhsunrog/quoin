@@ -81,6 +81,49 @@ fn tagged(tag: u8, coded: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Estimated entropy-coded size (bytes) of `bytes` under an **order-1** byte model
+/// — the model the range coder actually uses. A cheap O(n) proxy (one joint-
+/// histogram pass + a fixed 64 Ki-entry entropy sum) for the `code_residuals`
+/// output, so the mode competition can prune candidates without fully range-coding
+/// each. Order-1, not order-0, because predictor residuals have byte-to-byte
+/// correlation the range coder exploits and an order-0 estimate would mis-rank them.
+pub(crate) fn estimate_order1_bytes(bytes: &[u8]) -> usize {
+    if bytes.len() < 64 {
+        return bytes.len();
+    }
+    thread_local! {
+        // Reused across calls so the 256 KiB joint histogram isn't re-allocated.
+        static JOINT: std::cell::RefCell<Vec<u32>> =
+            std::cell::RefCell::new(vec![0u32; 256 * 256]);
+    }
+    JOINT.with(|j| {
+        let mut joint = j.borrow_mut();
+        joint.iter_mut().for_each(|x| *x = 0);
+        let mut marg = [0u32; 256];
+        let mut prev = 0usize;
+        for &b in bytes {
+            joint[prev * 256 + b as usize] += 1;
+            marg[prev] += 1;
+            prev = b as usize;
+        }
+        // H(X|prev) · n = Σ joint · log2(marg[prev] / joint)   (bits).
+        let mut bits = 0f64;
+        for p in 0..256 {
+            let m = marg[p];
+            if m == 0 {
+                continue;
+            }
+            let mf = f64::from(m);
+            for &c in &joint[p * 256..p * 256 + 256] {
+                if c > 0 {
+                    bits += f64::from(c) * (mf / f64::from(c)).log2();
+                }
+            }
+        }
+        (bits / 8.0).ceil() as usize
+    })
+}
+
 pub(crate) fn code_residuals(residuals: &[u8], lambda: u64, allow_lz: bool) -> Vec<u8> {
     let basic = entropy_pick(residuals, lambda);
 
