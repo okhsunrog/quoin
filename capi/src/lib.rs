@@ -1,7 +1,7 @@
 //! C ABI for `quoin`. See `include/quoin.h` for the C-side
 //! declarations and usage notes.
 //!
-//! Design (per the parent's `TODO.md`):
+//! Design (see the C ABI entry in the parent's `ROADMAP.md`):
 //! * Context-free [`quoin_compress`]/[`quoin_decompress`] use rayon's global pool.
 //! * An opaque [`QuoinCtx`] owns a persistent thread pool so frequent C callers
 //!   get bounded threads without per-call pool churn (they can't use rayon's

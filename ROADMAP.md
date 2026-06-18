@@ -20,7 +20,7 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
       winner — BtrBlocks/Vortex style). Sample is ~5–9× faster encode for ~2%
       ratio. A/B-able via `FCBENCH_SELECT=sample`.
 - [x] **Block-parallel** encode/decode (rayon, default-on `parallel` feature).
-- [x] **Speed/ratio levels** (`Config.level`: `Fastest`/`Fast`/`Balanced`/`Max`):
+- [x] **Speed/ratio levels** (`Config.level`: `Fastest`/`Fast`/`Balanced`/`High`/`Max`):
       cost-aware selection `argmin(size + λ·decode_cost)` + per-level entropy-coder
       gate. `Max` is the default and bit-identical to the historical output. See
       [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
@@ -37,22 +37,36 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
       (widths 0..=32) and a `u64` kernel (`pack64`/`unpack64`, 0..=64) for wide
       integer columns; `FOR_BITPACK` packs wide ranges instead of raw-fallback.
 
-**Codecs (16)**
+**Codecs (20 modes)**
 - [x] Float/general: `RAW`, `CONST`, `STRIDE`, `XORZ`, `PRED` (FCM), `PRED2` (DFCM),
       `PRED_RC`, `DELTA2` (float-linear), `ORDERED_DELTA` (int 2nd-delta),
       `DELTA_DP` (exact float-residual delta), `LZ` (LZ77), `BYTE_TRANSPOSE`
       (= shuffle / BYTE_STREAM_SPLIT), `FLOAT_MULT`.
 - [x] Integer/decimal (columnar foundation): **`FOR_BITPACK`** (frame-of-reference
       + bit-pack), **`ALP`** main scheme (scaled-int decimals + exceptions),
-      **`DELTA_BITPACK`** (delta → FoR+bitpack cascade = Parquet DELTA_BINARY_PACKED).
+      **`ALP_RD`** (real-double split-dict), **`DELTA_BITPACK`** (delta → FoR+bitpack
+      cascade = Parquet DELTA_BINARY_PACKED), **`DICT`**, **`RLE`**.
+- [x] **`PCO`** — vendored [pcodec](https://github.com/mwlon/pcodec) numeric backend
+      (`vendor/pco`, gated to `High`/`Max`); three vectorizable decode leaves
+      annotated `#[multiversion]` so a stock build gets the SIMD fast path without
+      `-C target-cpu=native`. Adds a `High` level between `Balanced` and `Max`.
 
 **Quality**
 - [x] Round-trip tests (incl. NaN/±0/inf), `tests/robustness.rs`, and `fuzz/`
       (cargo-fuzz) — fixed 3 decoder crash/DoS vectors.
 - [x] Harnesses: `examples/compare.rs` (ratio + throughput vs zstd / C `fc`),
       criterion kernel benches (`benches/kernels.rs`).
-- [x] **C ABI** (`capi/` crate: cdylib + staticlib, context handle, catch_unwind,
-      C round-trip test). See [`TODO.md`](TODO.md).
+- [x] **C ABI** (`capi/` crate: cdylib + staticlib). Global-pool
+      `quoin_compress`/`quoin_decompress` **and** an opaque context handle
+      (`quoin_ctx_create(threads)` / `*_ctx` / `quoin_ctx_free`) owning a persistent
+      rayon pool for bounded-thread, churn-free calls (like `ZSTD_CCtx`). Every
+      entry point `catch_unwind`s (no unwind across `extern "C"`); errors are codes;
+      caller-sized buffers + `quoin_compress_bound`; `cbindgen` header. Fork-without-exec
+      and `dlclose`-while-threads-alive caveats documented in the header.
+- [x] **Typed, Arrow-native C ABI** (`capi/src/typed.rs`): `QuoinDType` for
+      Bool/I8–64/U8–64/F32/F64/Decimal32–256, decode-into-caller-buffer,
+      alignment-safe with a zero-copy fast path when the input is aligned. Narrow
+      types widen to existing lanes (I8/16→I32, U8/16/Bool→U32, Dec32/64→Dec128).
 
 ## Results (bundled harness, 1 Mi values/dataset, 18-core box)
 
@@ -84,12 +98,13 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
        columns (`medicare1`, ~46 K distinct/block), and `ALP digits → entropy`.
 4. [ ] **PFOR patching** — move range-outliers to exceptions in FOR_BITPACK/ALP so
        one large value doesn't widen a whole sub-block.
-4. ◑ **Typed column API** — generalize off `f64` to real typed columns + a type
+4. [x] **Typed column API** — generalize off `f64` to real typed columns + a type
        tag, so the integer codecs operate on real columns, not f64 bits.
-       **Done:** `DType`/`ColumnRef`/`Column` + `compress_column`, format v2
-       carries the column type, family-aware gating, **64-bit** (`F64`/`I64`/`U64`)
-       and **32-bit** (`I32`/`U32`) lanes with signedness-aware FoR and width-aware
-       RAW. Remaining: narrow `8/16`-bit, `F32`, decimals. See
+       `DType`/`ColumnRef`/`Column` + `compress_column`, format v2 carries the
+       column type, family-aware gating, **64-bit** (`F64`/`I64`/`U64`), **32-bit**
+       (`I32`/`U32`/`F32`) lanes with signedness-aware FoR and width-aware RAW, and
+       **`Decimal128`/`Decimal256`** containers (scale/precision preserved). Narrow
+       `8/16`-bit are widened at the C-ABI boundary (no native lane yet). See
        [`docs/TYPES.md`](docs/TYPES.md).
 
    Benchmarked against zstd/lz4/deflate on the ALP float corpus — see
@@ -99,9 +114,11 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
 5. [x] **Nulls / validity** — Arrow-compatible bitmap (`src/validity.rs`), nulls
        compacted out of the value stream, bitmap stored RLE/raw. `compress_column`
        takes `Option<&[u8]>`; `decompress_column` returns values + validity.
-6. ◑ **Arrow adapter** (`src/arrow.rs`, feature `arrow`) — `compress_array`/
-       `decompress_array` for the primitive numeric arrays with validity
-       (incl. sliced). Pending: temporal/decimal + benchmark vs Parquet/Vortex.
+6. [x] **Arrow adapter** (`src/arrow.rs`, feature `arrow`) — `compress_array`/
+       `decompress_array` for primitive numeric **and `Decimal128`/`Decimal256`**
+       arrays with validity (incl. sliced), zero-copy from Arrow buffers.
+       Benchmarked vs Parquet-zstd (`examples/real_parquet.rs`) and Vortex
+       (`examples/vs_vortex.rs`). Pending: temporal types.
 7. [ ] **Compute-on-encoded / predicate pushdown** (filter/take over encoded
        arrays) — Vortex's killer feature; the thing that makes us useful *inside*
        a query engine (DataFusion or any columnar store).
