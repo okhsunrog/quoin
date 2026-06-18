@@ -46,7 +46,7 @@ spans 496→9 MB/s encode.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | air_sensor | 1.00 | 1.13 | 1.07 | 1.19 | 1.19 | **1.38** |
 | bird_migration | 2.13 | 3.13 | 3.04 | 3.37 | 5.18 | **6.03** |
-| basel_wind | 2.29 | 3.74 | 4.38 | 5.00 | 2.10 | **5.52** |
+| basel_wind | 2.29 | 3.74 | 4.38 | 5.00 | 6.46 | **7.29** |
 | poi_lat | 1.01 | 1.14 | 1.31 | **1.75** | 1.14 | 1.20 |
 | city_temperature | 2.48 | 4.43 | 4.05 | 6.29 | 7.34 | **8.68** |
 | food_prices | 2.55 | 4.08 | 3.87 | **4.93** | 3.87 | 4.83 |
@@ -139,7 +139,7 @@ After adding **ALP-RD** and **dictionary/RLE**:
 | poi_lat | 1.00→**1.14×** | 1.75× | ALP-RD now used (was RAW). Decodes ~5× faster than zstd. |
 | poi_lon | 1.00→**1.12×** | 1.49× | ALP-RD. |
 | medicare1 | **2.01×** | 2.83× | DICT value compression + code entropy help, but high-cardinality billing sequences still trail zstd. |
-| basel_wind | 2.10× | 5.00× | ALP wins competition but underperforms — needs a second stage on the digits. |
+| basel_wind | 2.10→**7.29×** | 5.00× | **Resolved:** running the strong modes (ALP) before the predictors fixed a `block_compressible` ordering bug that wrongly skipped LZ/transpose/dict here — now beats zstd-19 (see the top "README benchmark" section). |
 | basel_temp | **4.58×** | 3.95× | DICT code entropy now beats zstd on this column. |
 
 ALP-RD is the principled real-double codec: it trades a little ratio for big
