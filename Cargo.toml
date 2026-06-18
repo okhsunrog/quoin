@@ -2,6 +2,8 @@
 name = "quoin"
 version = "0.1.0"
 edition = "2024"
+# Binding constraints: edition 2024 (1.85), `is_multiple_of` (1.87), let-chains (1.88).
+rust-version = "1.88"
 description = "Lossless compressor for streams of IEEE-754 f64 — Rust port of the `fc` floating-point compressor"
 license = "Apache-2.0"
 repository = "https://github.com/okhsunrog/quoin"

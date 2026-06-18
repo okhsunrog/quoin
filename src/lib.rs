@@ -572,6 +572,14 @@ pub mod bench_internals {
     pub fn tans_decompress(bytes: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
         crate::entropy::tans::decompress_bytes(bytes, max_len)
     }
+    /// The 4-way interleaved rANS coder — the actual default entropy coder at
+    /// `Balanced` (unlike the legacy `tans`, which is decode-only).
+    pub fn rans_compress(bytes: &[u8]) -> Option<Vec<u8>> {
+        crate::entropy::rans::compress_bytes(bytes)
+    }
+    pub fn rans_decompress(bytes: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
+        crate::entropy::rans::decompress_bytes(bytes, max_len)
+    }
 
     pub fn fcm_encode(vals: &[u64], predictor_log2: u8) -> Vec<u8> {
         crate::codecs::pred::encode(vals, predictor_log2)

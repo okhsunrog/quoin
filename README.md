@@ -2,8 +2,13 @@
 
 📖 [Русская версия](README.ru.md)
 
-**A lossless, type-aware compressor for columns of numbers — written in safe
-Rust, built on the Apache Arrow data model.**
+**A lossless, type-aware compressor for columns of numbers — written in mostly
+safe Rust, built on the Apache Arrow data model.**
+
+(The only `unsafe` in quoin's own code is two small, documented blocks: the CRC32C
+hardware intrinsic in `hash.rs` and a bounds-check elision in the range coder's
+hot loop — every SIMD kernel also has a bit-exact safe fallback. The vendored
+`pco` backend uses more internal `unsafe` for its fast bit-reader.)
 
 quoin compresses columns of `f64`/`f32`/`i64`/`u64`/`i32`/`u32`/decimal (with
 null/validity bitmaps) by running a **per-block competition** of lightweight,
@@ -225,48 +230,62 @@ How that compares to **Parquet** as a compression layer:
 ## Benchmarks
 
 Measured on an Intel Core Ultra 5 125H, stable Rust release build (no
-`target-cpu=native`), **pinned to the 4 performance cores** (`taskset -c 0-7`,
-`RAYON_NUM_THREADS=8`) so the numbers are stable and don't drift onto the E-cores.
-Integer columns are real `i64`/`i32` from the ClickBench `hits` dataset; float
-columns are the **ALP benchmark corpus**; decimal columns are real f64 values
-stored as fixed-point `Decimal128`. Ratio = original ÷ compressed (higher is
-better); throughput in MB/s of *uncompressed* data (median of 3 trials). Baselines
-(`lz4`, `zlib`, `zstd`) are single-threaded bulk APIs; quoin uses its default
-block-parallel (rayon) path. Reproduce with:
+`target-cpu=native`), **single-threaded** — quoin built **without the `parallel`
+feature** (no rayon) and pinned to one P-core (`taskset -c 0`), so it's measured
+apples-to-apples against the single-threaded `lz4`/`zlib`/`zstd` bulk APIs. (quoin's
+default build *is* block-parallel; that just isn't a fair thing to put on the same
+axis as a single-threaded baseline.) Integer columns are real `i64`/`i32` from the
+ClickBench `hits` dataset; float columns are the **ALP benchmark corpus**; decimal
+columns are real f64 values stored as fixed-point `Decimal128`. Ratio = original ÷
+compressed (higher is better); throughput in MB/s of *uncompressed* data (median of
+3 trials). Reproduce with:
 
 ```bash
-# f64 (ALP corpus)
-cargo run --release --example bench_readme \
+# f64 (ALP corpus) — single-threaded, no rayon
+taskset -c 0 cargo run --release --no-default-features --example bench_readme \
     --features bench-zstd,bench-lz4,bench-deflate > bench.csv
 # integers (ClickBench parquet) + Decimal128
 PARQUET_FILE=datasets/parquet/clickbench_hits_0.parquet \
-cargo run --release --example bench_typed \
+taskset -c 0 cargo run --release --no-default-features --example bench_typed \
     --features bench-parquet,bench-zstd,bench-lz4,bench-deflate > typed.csv
 ```
 
 ### The ratio ⇄ speed tradeoff, per data type
 
-Each codec is one point — **top-right is best** (high ratio, high throughput) —
-with compression speed on the left and decompression speed on the right. The
-charts are ordered by how dramatic quoin's advantage is: **integers and decimals
-first** (where the specialized lanes pull furthest ahead), **floats last** (quoin's
-hardest case).
+All numbers are **single-threaded** (one P-core, no rayon) so quoin and the
+single-threaded `lz4`/`zlib`/`zstd` are measured apples-to-apples. Each codec is
+one point — **top-right is best** (high ratio, high throughput) — compression speed
+on the left, decompression on the right. The charts are ordered by quoin's ratio
+lead: **integers and decimals first** (where the specialized lanes pull furthest
+ahead), **floats last** (quoin's hardest case).
 
-**Integers** — quoin-Balanced lands top-right on *both* axes (higher ratio *and*
-faster than every baseline); quoin-Max stretches the ratio to 8.4×, while
-`zstd -19` only reaches 5.1× by collapsing to 3.3 MB/s compress:
+Two honest takeaways across all three types:
+
+- **Decode is quoin's frontier.** quoin holds the best ratio *and* a decode speed
+  at or above the baselines — the quoin levels trace the top-right edge of the
+  decompress panel (Fastest = fastest decode, Max = highest ratio, both still quick).
+- **Encode is a deliberate tradeoff.** The per-block codec *search* costs CPU, so
+  quoin's high-ratio levels encode slower than fast `lz4`/`zstd -3` (which buy that
+  speed with a far worse ratio). quoin still encodes **10–40× faster than `zstd -19`
+  at a better ratio**, and the level knob (Fastest→Max) lets you trade encode speed
+  for ratio explicitly.
+
+**Integers** — quoin-Max reaches 8.4× (vs `zstd -19`'s 5.1×) and decodes faster than
+every baseline; on encode it's slower than `zstd -3` but still ~3× faster than
+`zstd -19` at a much higher ratio:
 
 ![integer columns: ratio vs speed](docs/images/pareto_int.png)
 
-**Decimals** — quoin-Max takes the best ratio (17.4× vs `zstd -19`'s 14.3×) at
-~15× the encode speed; quoin-Balanced trades a hair of ratio for ~40× faster
-encode and the fastest decode:
+**Decimals** — quoin-Max takes the best ratio (17.4× vs `zstd -19`'s 14.3×);
+quoin-Balanced gets 13.3× at **40 MB/s** encode versus `zstd -19`'s 14.3× at
+**3 MB/s** (~13× faster), and the quoin levels own the decode panel:
 
 ![decimal columns: ratio vs speed](docs/images/pareto_decimal.png)
 
-**Floats** — the narrowest gap (mantissa bits are high-entropy), yet quoin still
-sits top-right: quoin-Balanced beats `zstd -19`'s ratio (2.53 vs 2.20) while
-compressing **~145× faster** and decompressing **~3.6× faster**:
+**Floats** — the narrowest gap (mantissa bits are high-entropy): quoin-Balanced
+beats `zstd -19`'s ratio (2.53 vs 2.20) and decodes **~2.7× faster**; here the fast
+`lz4`/`zstd -3` do encode faster (at 1.35–1.89× ratio), so floats are where quoin's
+encode-search cost is most visible:
 
 ![float columns: ratio vs speed](docs/images/pareto_float.png)
 
@@ -275,15 +294,15 @@ columns truncate the same data to show ratio is size-stable):
 
 | codec | ratio | compress MB/s | decompress MB/s | ratio @100 K | ratio @1 M |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| quoin (Fastest) | 1.17 | **1561** | 2575 | 1.18 | 1.17 |
-| quoin (Fast) | 2.52 | 387 | 2572 | 2.47 | 2.51 |
-| **quoin (Balanced)** | **2.53** | 352 | **2607** | 2.55 | 2.52 |
-| quoin (High) | 2.72 | 114 | 2012 | 2.72 | 2.71 |
-| **quoin (Max)** | **2.72** | 45 | 1976 | 2.72 | 2.71 |
-| lz4 | 1.35 | 363 | 1856 | 1.32 | 1.34 |
-| zlib -6 | 1.95 | 40 | 360 | 1.91 | 1.94 |
-| zstd -3 | 1.89 | 201 | 738 | 1.86 | 1.88 |
-| zstd -19 | 2.20 | **2.4** | 730 | 2.17 | 2.19 |
+| quoin (Fastest) | 1.17 | 496 | 1144 | 1.18 | 1.17 |
+| quoin (Fast) | 2.52 | 78 | **1594** | 2.47 | 2.51 |
+| **quoin (Balanced)** | **2.53** | 67 | 1580 | 2.55 | 2.52 |
+| quoin (High) | 2.72 | 22 | 820 | 2.72 | 2.71 |
+| **quoin (Max)** | **2.72** | 9 | 750 | 2.72 | 2.71 |
+| lz4 | 1.35 | **326** | 1577 | 1.32 | 1.34 |
+| zlib -6 | 1.95 | 32 | 305 | 1.91 | 1.94 |
+| zstd -3 | 1.89 | 172 | 633 | 1.86 | 1.88 |
+| zstd -19 | 2.20 | 2.4 | 591 | 2.17 | 2.19 |
 
 ### Ratio across real columns
 
@@ -336,11 +355,11 @@ the raw little-endian value bytes.
 Takeaways: quoin-Max takes the best ratio on **every decimal column** and most
 integer columns; it ties everyone at ~1.0× on genuinely random IDs (`WatchID` —
 nothing compresses that), and `zstd -19` edges it on one structured i32
-(`RegionID`). The bigger story is the **speed gap at equal-or-better ratio**: on
-`city_temperature` decimals quoin-Balanced reaches 13.3× at **134 MB/s** compress,
-versus `zstd -19`'s 14.3× at **3.2 MB/s** — ~40× faster encode for a comparable
-ratio, and quoin-Max then beats it outright. The relative speed advantage is the
-same one f64 shows, but the absolute ratios are far higher.
+(`RegionID`). Single-threaded, quoin's win is **ratio + decode speed**: on
+`city_temperature` decimals quoin-Balanced reaches 13.3× decoding at ~2 GB/s, and
+quoin-Max pushes to 17.4× — above `zstd -19`'s 14.3×. The same caveat as the floats
+applies on encode: the codec search is CPU-heavy, so the fast LZ baselines encode
+quicker (at far lower ratio) while quoin still encodes well ahead of `zstd -19`.
 
 ## Performance: SIMD, multiversion, rayon
 

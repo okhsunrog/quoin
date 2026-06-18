@@ -93,18 +93,18 @@ def make_pareto(sub, headline, subtitle, fname):
 vol = df[(df.section == "volume") & (df.n == df[df.section == "volume"].n.max())]
 make_pareto(
     td[td.section == "EventTime"],
-    "Integers — the widest gap: quoin tops both axes",
-    "real ClickBench EventTime (i64 timestamp) · 1 M values · Intel Core Ultra 5 125H",
+    "Integers — quoin's widest ratio lead, and the fastest high-ratio decode",
+    "real ClickBench EventTime (i64 timestamp) · 1 M values · single-threaded, Intel Core Ultra 5 125H",
     "pareto_int.png")
 make_pareto(
     td[td.section == "city_temperature"],
-    "Decimals — quoin-Max takes the ratio, at a fraction of the encode cost",
-    "city_temperature stored as Decimal128 · 2 M values",
+    "Decimals — quoin-Max takes the best ratio; quoin leads on decode",
+    "city_temperature stored as Decimal128 · 2 M values · single-threaded",
     "pareto_decimal.png")
 make_pareto(
     vol[["codec", "ratio", "enc_mbps", "dec_mbps"]],
-    "Floats — quoin's hardest case, and still top-right",
-    "real arade4 f64 column · 9.9 M values",
+    "Floats — the narrowest gap (quoin's hardest case); still best ratio + fast decode",
+    "real arade4 f64 column · 9.9 M values · single-threaded",
     "pareto_float.png")
 
 

@@ -44,22 +44,25 @@ fn bench_entropy(c: &mut Criterion) {
     // A realistic residual stream: DFCM residuals of a smooth signal.
     let residuals = bi::dfcm_encode(&smooth_bits(), 16);
     let rc = bi::rc_compress(&residuals);
-    let tans = bi::tans_compress(&residuals);
+    let rans = bi::rans_compress(&residuals);
 
     let mut g = c.benchmark_group("entropy");
     g.throughput(Throughput::Bytes(residuals.len() as u64));
+    // The order-1 binary range coder: best ratio, slowest decode.
     g.bench_function("rc_compress", |b| {
         b.iter(|| bi::rc_compress(black_box(&residuals)))
     });
     g.bench_function("rc_decompress", |b| {
         b.iter(|| bi::rc_decompress(black_box(&rc), residuals.len()).unwrap())
     });
-    if let Some(t) = tans {
-        g.bench_function("tans_compress", |b| {
-            b.iter(|| bi::tans_compress(black_box(&residuals)))
+    // The 4-way interleaved rANS coder: the default at `Balanced`. Benchmarking
+    // it (not the decode-only legacy tANS) is what calibrates W_RC vs W_RANS.
+    if let Some(r) = rans {
+        g.bench_function("rans_compress", |b| {
+            b.iter(|| bi::rans_compress(black_box(&residuals)))
         });
-        g.bench_function("tans_decompress", |b| {
-            b.iter(|| bi::tans_decompress(black_box(&t), residuals.len()).unwrap())
+        g.bench_function("rans_decompress", |b| {
+            b.iter(|| bi::rans_decompress(black_box(&r), residuals.len()).unwrap())
         });
     }
     g.finish();
