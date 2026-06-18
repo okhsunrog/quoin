@@ -236,34 +236,37 @@ cargo run --release --example bench_readme \
     --features bench-zstd,bench-lz4,bench-deflate > bench.csv
 ```
 
-### Ratio vs throughput at different volumes
+### The ratio ⇄ speed tradeoff
 
-Same real column (`arade4`, 9.9 M doubles), truncated to a sweep of sizes:
+The whole point of a type-aware codec is to escape the usual "pick ratio *or*
+speed" tradeoff. Each codec is one point below; **top-right is best** (high ratio,
+high throughput). quoin lands top-right on *both* axes — `zstd -19` matches it on
+ratio only by collapsing to 1.6 MB/s compress, and `lz4` is fast only at a ratio
+that barely compresses.
 
-![ratio and decompress speed vs column size](docs/images/volume_sweep.png)
+![ratio vs compress and decompress speed — quoin sits top-right](docs/images/pareto.png)
 
-Full column (9.9 M values):
+Numbers behind the plot (the full 9.9 M-value `arade4` column, the same data
+truncated to smaller sizes in the right-hand columns to show ratio is
+size-stable):
 
-| codec | ratio | compress MB/s | decompress MB/s |
-| --- | ---: | ---: | ---: |
-| **quoin (Balanced)** | **2.53** | 341 | **1396** |
-| quoin (High) | 2.72 | 99 | 994 |
-| **quoin (Max)** | **2.72** | 42 | 999 |
-| lz4 | 1.35 | 246 | 1569 |
-| zlib -6 | 1.95 | 26 | 277 |
-| zstd -3 | 1.89 | 119 | 559 |
-| zstd -19 | 2.20 | **1.6** | 581 |
+| codec | ratio | compress MB/s | decompress MB/s | ratio @100 K | ratio @1 M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **quoin (Balanced)** | **2.53** | 341 | **1396** | 2.55 | 2.52 |
+| quoin (High) | 2.72 | 99 | 994 | 2.72 | 2.71 |
+| **quoin (Max)** | **2.72** | 42 | 999 | 2.72 | 2.71 |
+| lz4 | 1.35 | 246 | 1569 | 1.32 | 1.34 |
+| zlib -6 | 1.95 | 26 | 277 | 1.91 | 1.94 |
+| zstd -3 | 1.89 | 119 | 559 | 1.86 | 1.88 |
+| zstd -19 | 2.20 | **1.6** | 581 | 2.17 | 2.19 |
 
 quoin-Balanced beats `zstd -19`'s ratio (2.53 vs 2.20) while compressing **~210×
 faster** and decompressing **~2.4× faster**; quoin-Max pushes ratio to 2.72.
 
-### Decode Pareto frontier
-
-Upper-right is best — quoin gives both the highest ratio *and* multi-GB/s decode:
-
-![decode Pareto frontier](docs/images/pareto.png)
-
 ### Ratio across real columns
+
+Across the ALP corpus, quoin-Max takes the best ratio on 6 of 8 columns (sorted
+left→right by quoin's ratio below):
 
 ![compression ratio across real f64 columns](docs/images/ratio_breadth.png)
 
