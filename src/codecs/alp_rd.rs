@@ -12,7 +12,10 @@
 use crate::codecs::for_bitpack;
 use crate::error::Error;
 use crate::varint;
-use std::collections::HashMap;
+// FxHashMap (non-cryptographic) instead of std's SipHash map: the keys are
+// integer `left`-parts and cardinality is tiny, so SipHash was ~30% of ALP-RD
+// encode time (profiled). FxHash collisions can't affect correctness here.
+use rustc_hash::FxHashMap as HashMap;
 
 /// Dictionary capacity for the `left` parts (matches the ALP reference). With ≤8
 /// entries the code is ≤3 bits.
@@ -36,7 +39,7 @@ fn right_mask(right_bw: u32) -> u64 {
 
 /// Frequency of each `left` part over an iterator of values, given `right_bw`.
 fn left_freq<'a>(vals: impl Iterator<Item = &'a u64>, right_bw: u32) -> HashMap<u64, u32> {
-    let mut freq: HashMap<u64, u32> = HashMap::new();
+    let mut freq: HashMap<u64, u32> = HashMap::default();
     for &v in vals {
         *freq.entry(v >> right_bw).or_insert(0) += 1;
     }

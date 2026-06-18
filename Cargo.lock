@@ -1931,6 +1931,7 @@ dependencies = [
  "parquet",
  "pco 1.0.2",
  "rayon",
+ "rustc-hash",
  "vortex",
  "zerocopy",
  "zstd",
