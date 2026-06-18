@@ -37,9 +37,9 @@ unsafe fn read_uniform_type(reader: &mut BitReader) -> PcoResult<Option<NumberTy
 ///
 /// Example of the lowest level API for reading a .pco file:
 /// ```
-/// use pco::FULL_BATCH_N;
-/// use pco::standalone::{FileDecompressor, DecompressorItem};
-/// # use pco::errors::PcoResult;
+/// use quoin_pco::FULL_BATCH_N;
+/// use quoin_pco::standalone::{FileDecompressor, DecompressorItem};
+/// # use quoin_pco::errors::PcoResult;
 ///
 /// # fn main() -> PcoResult<()> {
 /// let compressed = vec![112, 99, 111, 33, 0, 0]; // the minimal .pco file, for the sake of example

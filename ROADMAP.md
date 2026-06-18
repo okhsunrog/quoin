@@ -47,7 +47,7 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
       **`ALP_RD`** (real-double split-dict), **`DELTA_BITPACK`** (delta → FoR+bitpack
       cascade = Parquet DELTA_BINARY_PACKED), **`DICT`**, **`RLE`**.
 - [x] **`PCO`** — vendored [pcodec](https://github.com/mwlon/pcodec) numeric backend
-      (`vendor/pco`, gated to `High`/`Max`); three vectorizable decode leaves
+      (`vendor/quoin-pco`, gated to `High`/`Max`); three vectorizable decode leaves
       annotated `#[multiversion]` so a stock build gets the SIMD fast path without
       `-C target-cpu=native`. Adds a `High` level between `Balanced` and `Max`.
 

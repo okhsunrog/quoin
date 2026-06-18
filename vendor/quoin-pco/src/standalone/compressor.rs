@@ -19,9 +19,9 @@ unsafe fn write_varint<W: Write>(n: u64, writer: &mut BitWriter<W>) {
 ///
 /// Example of the lowest level API for writing a .pco file:
 /// ```
-/// use pco::ChunkConfig;
-/// use pco::standalone::FileCompressor;
-/// # use pco::errors::PcoResult;
+/// use quoin_pco::ChunkConfig;
+/// use quoin_pco::standalone::FileCompressor;
+/// # use quoin_pco::errors::PcoResult;
 ///
 /// # fn main() -> PcoResult<()> {
 /// let mut compressed = Vec::new();

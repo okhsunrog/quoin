@@ -359,7 +359,7 @@ beyond the benchmark.
 ### pco backend (closes the last smooth-double gap)
 
 The one column Vortex still led — `sensor_f64` — is exactly where Vortex's own
-numeric layer uses **pcodec** (pco). So quoin vendored pco (`vendor/pco`,
+numeric layer uses **pcodec** (pco). So quoin vendored pco (`vendor/quoin-pco`,
 Apache-2.0) and wired it as a competing block mode (`Mode::Pco`) at `High`/`Max`.
 It self-bails on tiny blocks and competes on pure size, so it only wins when
 strictly smaller. On `sensor_f64` it wins **every** block, taking quoin-max past
@@ -380,7 +380,7 @@ non-native build — beating even a `target-cpu=native` build — while pco's tw
 serial hot spots (interleaved-ANS symbol decode, delta prefix-sum) stay scalar
 because neither vectorizes. pco decode through quoin runs at **~2.8–3.4 GB/s**
 on `sensor_f64`, several times faster than vortex-compact's decode of the same
-column. See `vendor/pco/NOTICE` for the full list of fork changes.
+column. See `vendor/quoin-pco/NOTICE` for the full list of fork changes.
 
 ### Float32 lane
 

@@ -10,7 +10,7 @@ publish = false
 # dev loop stays rlib-only. Build the C library with:
 #   cargo build --release --manifest-path capi/Cargo.toml
 # Empty `[workspace]` detaches this crate from the parent quoin workspace (which
-# exists only for vendor/pco); it builds standalone with its own lockfile.
+# exists only for vendor/quoin-pco); it builds standalone with its own lockfile.
 [workspace]
 
 [lib]

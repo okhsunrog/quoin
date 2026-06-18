@@ -84,16 +84,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pco"
-version = "1.0.2"
-dependencies = [
- "better_io",
- "dtype_dispatch",
- "multiversion",
- "rand_xoshiro",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -108,8 +98,9 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "multiversion",
- "pco",
+ "quoin-pco",
  "rayon",
+ "rustc-hash",
  "zerocopy",
 ]
 
@@ -119,6 +110,16 @@ version = "0.1.0"
 dependencies = [
  "quoin",
  "rayon",
+]
+
+[[package]]
+name = "quoin-pco"
+version = "0.1.0"
+dependencies = [
+ "better_io",
+ "dtype_dispatch",
+ "multiversion",
+ "rand_xoshiro",
 ]
 
 [[package]]
@@ -164,6 +165,12 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "shlex"

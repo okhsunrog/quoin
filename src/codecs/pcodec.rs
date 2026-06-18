@@ -8,13 +8,13 @@
 //! at `High`/`Max` (see [`Level::allows_pco`](crate::Level::allows_pco)).
 //!
 //! The block arrives as quoin's internal `u64` lane (see [`DType`]); we map each
-//! lane word to the concrete pco [`Number`](pco::data_types::Number) type — using
-//! the *same* convention as [`ColumnRef::to_lane`](crate::ColumnRef) — compress,
-//! and on decode widen back to the lane bit-for-bit. pco is lossless (exact for
-//! NaN / ±0 / subnormals), so the lane round-trips exactly.
+//! lane word to the concrete pco [`Number`](quoin_pco::data_types::Number) type —
+//! using the *same* convention as [`ColumnRef::to_lane`](crate::ColumnRef) —
+//! compress, and on decode widen back to the lane bit-for-bit. pco is lossless
+//! (exact for NaN / ±0 / subnormals), so the lane round-trips exactly.
 
-use pco::ChunkConfig;
-use pco::standalone::{simple_compress, simple_decompress};
+use quoin_pco::ChunkConfig;
+use quoin_pco::standalone::{simple_compress, simple_decompress};
 
 use crate::dtype::DType;
 use crate::error::Error;

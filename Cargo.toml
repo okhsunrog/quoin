@@ -12,12 +12,13 @@ keywords = ["compression", "floating-point", "simd", "lossless", "time-series"]
 categories = ["compression"]
 
 [workspace]
-members = ["vendor/pco"]
+members = ["vendor/quoin-pco"]
 
 [dependencies]
 # Vendored fork of pco (pcodec) — strong numeric backend, used as a competing
-# block mode at the higher levels. See vendor/pco/NOTICE for fork changes.
-pco = { path = "vendor/pco" }
+# block mode at the higher levels. A workspace member (renamed from `pco` to
+# dodge the crates.io name collision). See vendor/quoin-pco/NOTICE for fork changes.
+quoin-pco = { path = "vendor/quoin-pco" }
 arrow-array = { version = "58", optional = true }
 arrow-buffer = { version = "58", optional = true }
 arrow-schema = { version = "58", optional = true }

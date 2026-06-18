@@ -47,7 +47,7 @@ from the best of the modern columnar-compression literature:
   decimals.
 - **BtrBlocks / Vortex** — the per-block "cascade of cheap encodings, pick the
   winner" philosophy, and the goal of staying *decodable fast*.
-- **[pcodec / pco](https://github.com/mwlon/pcodec)** — vendored (`vendor/pco`)
+- **[pcodec / pco](https://github.com/mwlon/pcodec)** — vendored (`vendor/quoin-pco`)
   as the top-tier numeric backend: latent decomposition + bin-packing + ANS.
 - **FastLanes** — the transposed 1024-lane bit-packing layout that autovectorizes.
 - **Parquet / ClickHouse** — the encodings (`DELTA_BINARY_PACKED`, dictionary,

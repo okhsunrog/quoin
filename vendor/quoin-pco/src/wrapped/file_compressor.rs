@@ -12,9 +12,9 @@ use crate::ChunkConfig;
 ///
 /// Example of the lowest level API for writing a wrapped file:
 /// ```
-/// use pco::ChunkConfig;
-/// use pco::wrapped::FileCompressor;
-/// # use pco::errors::PcoResult;
+/// use quoin_pco::ChunkConfig;
+/// use quoin_pco::wrapped::FileCompressor;
+/// # use quoin_pco::errors::PcoResult;
 ///
 /// # fn main() -> PcoResult<()> {
 /// let mut compressed = Vec::new();

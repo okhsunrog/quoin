@@ -1749,17 +1749,6 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 [[package]]
 name = "pco"
 version = "1.0.2"
-dependencies = [
- "better_io",
- "dtype_dispatch",
- "multiversion",
- "rand 0.8.6",
- "rand_xoshiro",
-]
-
-[[package]]
-name = "pco"
-version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "553ccdc7f6999785559af4998c79712a5ab820e26b68bad9146609c19587ec82"
 dependencies = [
@@ -1929,12 +1918,23 @@ dependencies = [
  "lz4_flex",
  "multiversion",
  "parquet",
- "pco 1.0.2",
+ "quoin-pco",
  "rayon",
  "rustc-hash",
  "vortex",
  "zerocopy",
  "zstd",
+]
+
+[[package]]
+name = "quoin-pco"
+version = "0.1.0"
+dependencies = [
+ "better_io",
+ "dtype_dispatch",
+ "multiversion",
+ "rand 0.8.6",
+ "rand_xoshiro",
 ]
 
 [[package]]
@@ -2556,7 +2556,7 @@ checksum = "110427e1a65221519c8127e92a8080ee922b5f76a311568d227fd227bfbdfa10"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
- "pco 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pco",
  "rand 0.10.1",
  "vortex-alp",
  "vortex-array",
@@ -2868,7 +2868,7 @@ version = "0.75.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8902b2df3068b37267c927cdec8905ea4e0e693d81274ba9713000929d1e514e"
 dependencies = [
- "pco 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pco",
  "prost",
  "vortex-array",
  "vortex-buffer",

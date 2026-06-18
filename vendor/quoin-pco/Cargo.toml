@@ -1,11 +1,13 @@
 [package]
-name = "pco"
-version = "1.0.2"
+name = "quoin-pco"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.87.0"
-description = "Vendored fork of pco (pcodec) — good compression for numerical sequences"
+description = "quoin's vendored fork of pco (pcodec) — good compression for numerical sequences"
 license = "Apache-2.0"
-repository = "https://github.com/pcodec/pcodec"
+repository = "https://github.com/okhsunrog/quoin"
+# Renamed from `pco` to avoid the crates.io name collision; publishable separately
+# (a workspace member with its own version) when quoin is published. Not yet.
 publish = false
 
 # Vendored fork of pco 1.0.2 (https://github.com/pcodec/pcodec), © mwlon,
@@ -28,5 +30,5 @@ multiversion = "0.8.0"
 rand = "0.8.4"
 
 [lib]
-name = "pco"
+name = "quoin_pco"
 path = "src/lib.rs"
