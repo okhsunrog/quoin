@@ -87,7 +87,7 @@ pub enum Selection {
 /// | --- | --- | --- |
 /// | `Fastest` | minimal pool (RAW/CONST/STRIDE + FoR/delta bit-pack) | fastest |
 /// | `Fast` | + XORZ/ALP/ALP-RD/dict/RLE (still no entropy) | fast, random-access |
-/// | `Balanced` | + rANS entropy on the *vectorizable* modes (no range coder, no predictors) | fast-ish |
+/// | `Balanced` | + rANS entropy on the *vectorizable* modes + pco (fast decode) | fast-ish |
 /// | `High` | + the sequential predictors and the range coder | slower, best "normal" ratio |
 /// | `Max` | + the LZ-over-residual cascade, no speed penalty | slowest, any cost |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,9 +102,11 @@ pub enum Level {
     /// still no entropy coder, so decode stays random-access and fast.
     Fast,
     /// Adds the rANS entropy coder on the *vectorizable* entropy modes
-    /// (byte-transpose, dictionary, FLOAT_MULT), but **not** the sequential
-    /// predictors and **not** the bit-serial range coder. Decode stays fast (no
-    /// value-to-value recurrence); ratio improves over `Fast` on skewed data.
+    /// (byte-transpose, dictionary, FLOAT_MULT) **and the pco backend** (whose
+    /// decode is fast/vectorized — it fits here even though its encode is heavy),
+    /// but **not** the sequential predictors and **not** the bit-serial range
+    /// coder. Decode stays fast (no value-to-value recurrence); ratio improves
+    /// substantially over `Fast` on structured numeric data.
     Balanced,
     /// Adds the sequential predictors (FCM/DFCM/polynomial-float/2nd-order int)
     /// and the bit-serial range coder, chosen only when their ratio gain beats
@@ -166,17 +168,21 @@ impl Level {
     }
 
     /// Whether the vendored **pco** (pcodec) backend may compete — a heavyweight
-    /// numeric codec (latent decomposition + bin-packing + ANS) that wins on
-    /// smooth/structured numeric columns. Reserved for `High`/`Max`: its encode
-    /// searches hard and its decode, while vectorized, is costlier than the cheap
-    /// bit-packers, so the fast levels skip it.
+    /// numeric codec (latent decomposition + bin-packing + ANS). It is unusual:
+    /// **fast vectorized decode** (multi-GB/s) but *expensive encode*. Because its
+    /// decode is cheap it belongs in `Balanced` (whose contract is fast decode, not
+    /// fast encode) and up — `Balanced` already trades encode for ratio. Keeping it
+    /// out of `Balanced` was the cause of the "Balanced decodes slower than Max"
+    /// inversion (Max could pick pco, Balanced couldn't). `Fastest`/`Fast` still
+    /// skip it (their contract *is* fast encode + random access).
     pub(crate) fn allows_pco(self) -> bool {
-        matches!(self, Level::High | Level::Max)
+        matches!(self, Level::Balanced | Level::High | Level::Max)
     }
 
-    /// pco compression level (`0..=12`). Affects only how hard the encoder
-    /// searches — decode cost is independent — so `Max` (ratio at any encode
-    /// cost) searches to the top while `High` uses pco's balanced default.
+    /// pco search level (`0..=12`). Decode cost is level-independent — only trades
+    /// encode time for ratio. (Measured: 8 vs 12 barely moves ratio on the corpus,
+    /// so it is *not* a useful level-spreader; `Max` searches the top, the rest use
+    /// pco's balanced default.)
     pub(crate) fn pco_level(self) -> usize {
         match self {
             Level::Max => 12,
