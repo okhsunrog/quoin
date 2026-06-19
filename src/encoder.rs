@@ -338,7 +338,7 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
         if let Some(p) = alp::encode(block) {
             best.consider(Mode::Alp, p);
         }
-        if let Some(p) = alp_rd::encode(block) {
+        if let Some(p) = alp_rd::encode(block, entropy, lambda, allow_lz) {
             best.consider(Mode::AlpRd, p);
         }
     }
@@ -572,7 +572,7 @@ fn encode_mode(
         Mode::ByteTranspose => Some(code_residuals(&transpose::encode(block), lambda, allow_lz)),
         Mode::ForBitpack => Some(for_bitpack::encode(block, dtype.signed())),
         Mode::Alp => alp::encode(block),
-        Mode::AlpRd => alp_rd::encode(block),
+        Mode::AlpRd => alp_rd::encode(block, entropy, lambda, allow_lz),
         Mode::Dict => dict::encode(block, entropy, lambda, allow_lz),
         Mode::Rle => rle::encode(block),
         Mode::DeltaBitpack => Some(delta_bitpack::encode(block)),

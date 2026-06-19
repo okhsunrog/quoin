@@ -10,8 +10,15 @@
 //! kernel). The cut is chosen by estimating the encoded size on a sample.
 
 use crate::codecs::for_bitpack;
+use crate::entropy::{code_residuals, decode_residuals};
 use crate::error::Error;
 use crate::varint;
+
+// Per-stream encoding tag (codes / rights). The streams used to be raw bit-packed
+// only; at the entropy levels they can instead be entropy-coded (codes are
+// ≤MAX_DICT-cardinality, rights have residual structure), chosen by size.
+const T_BITPACK: u8 = 0;
+const T_ENT: u8 = 1;
 // FxHashMap (non-cryptographic) instead of std's SipHash map: the keys are
 // integer `left`-parts and cardinality is tiny, so SipHash was ~30% of ALP-RD
 // encode time (profiled). FxHash collisions can't affect correctness here.
@@ -122,7 +129,7 @@ pub(crate) fn debug_streams(vals: &[u64]) -> Option<(Vec<u64>, Vec<u64>)> {
     Some((codes, rights))
 }
 
-pub(crate) fn encode(vals: &[u64]) -> Option<Vec<u8>> {
+pub(crate) fn encode(vals: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -> Option<Vec<u8>> {
     if vals.is_empty() {
         return None;
     }
@@ -171,10 +178,30 @@ pub(crate) fn encode(vals: &[u64]) -> Option<Vec<u8>> {
         varint::write_u64(&mut out, p);
         out.extend_from_slice(&l.to_le_bytes());
     }
-    let codes_blob = for_bitpack::encode(&codes, false);
+    // Cascade each stream through the entropy coder at the entropy levels; raw
+    // bit-pack stays the fast-decode path for Fast/Fastest. Codes are
+    // ≤MAX_DICT-cardinality → entropy the raw code bytes; rights are wide → entropy
+    // the bit-packed blob. Keep whichever is smaller.
+    let codes_bp = for_bitpack::encode(&codes, false);
+    let (codes_tag, codes_blob) = if entropy {
+        let code_bytes: Vec<u8> = codes.iter().map(|&c| c as u8).collect();
+        let ent = code_residuals(&code_bytes, lambda, allow_lz);
+        if ent.len() < codes_bp.len() { (T_ENT, ent) } else { (T_BITPACK, codes_bp) }
+    } else {
+        (T_BITPACK, codes_bp)
+    };
+    let rights_bp = for_bitpack::encode(&rights, false);
+    let (rights_tag, rights_blob) = if entropy {
+        let ent = code_residuals(&rights_bp, lambda, allow_lz);
+        if ent.len() < rights_bp.len() { (T_ENT, ent) } else { (T_BITPACK, rights_bp) }
+    } else {
+        (T_BITPACK, rights_bp)
+    };
+    out.push(codes_tag);
     varint::write_u64(&mut out, codes_blob.len() as u64);
     out.extend_from_slice(&codes_blob);
-    out.extend_from_slice(&for_bitpack::encode(&rights, false));
+    out.push(rights_tag);
+    out.extend_from_slice(&rights_blob);
     Some(out)
 }
 
@@ -214,11 +241,34 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
         exceptions.push((p, l));
     }
 
+    let codes_tag = *payload.get(pos).ok_or(Error::Truncated)?;
+    pos += 1;
     let codes_len = varint::read_u64(payload, &mut pos)? as usize;
     let codes_blob = payload.get(pos..pos + codes_len).ok_or(Error::Truncated)?;
-    let rights_blob = payload.get(pos + codes_len..).ok_or(Error::Truncated)?;
-    let codes = for_bitpack::decode(codes_blob, n, false)?;
-    let rights = for_bitpack::decode(rights_blob, n, false)?;
+    pos += codes_len;
+    let rights_tag = *payload.get(pos).ok_or(Error::Truncated)?;
+    pos += 1;
+    let rights_blob = payload.get(pos..).ok_or(Error::Truncated)?;
+
+    let codes = match codes_tag {
+        T_BITPACK => for_bitpack::decode(codes_blob, n, false)?,
+        T_ENT => {
+            let bytes = decode_residuals(codes_blob, n)?;
+            if bytes.len() != n {
+                return Err(Error::CorruptPayload("alp_rd codes length"));
+            }
+            bytes.into_iter().map(u64::from).collect()
+        }
+        _ => return Err(Error::CorruptPayload("alp_rd codes tag")),
+    };
+    let rights = match rights_tag {
+        T_BITPACK => for_bitpack::decode(rights_blob, n, false)?,
+        T_ENT => {
+            let bp = decode_residuals(rights_blob, n.saturating_mul(8) + 64)?;
+            for_bitpack::decode(&bp, n, false)?
+        }
+        _ => return Err(Error::CorruptPayload("alp_rd rights tag")),
+    };
 
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -239,10 +289,15 @@ mod tests {
     use super::*;
 
     fn roundtrip(vals: &[u64]) -> Option<usize> {
-        let enc = encode(vals)?;
-        let dec = decode(&enc, vals.len()).unwrap();
-        assert_eq!(dec, vals);
-        Some(enc.len())
+        // Exercise both the raw bit-pack path (Fast) and the entropy cascade
+        // (Balanced rANS + Max range-coder/LZ); all must round-trip exactly.
+        let raw = encode(vals, false, 0, false)?;
+        assert_eq!(decode(&raw, vals.len()).unwrap(), vals);
+        let bal = encode(vals, true, 2, false)?;
+        assert_eq!(decode(&bal, vals.len()).unwrap(), vals);
+        let max = encode(vals, true, 0, true)?;
+        assert_eq!(decode(&max, vals.len()).unwrap(), vals);
+        Some(raw.len())
     }
 
     #[test]
