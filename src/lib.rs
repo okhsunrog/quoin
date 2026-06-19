@@ -598,6 +598,11 @@ pub mod bench_internals {
     pub fn alp_rd_streams(vals: &[u64]) -> Option<(Vec<u64>, Vec<u64>)> {
         crate::codecs::alp_rd::debug_streams(vals)
     }
+    /// Cascade-lab: ALP's full bit-packed output (digits + metadata inline), so the
+    /// lab can gauge a lower bound on digits→entropy savings (rANS over the whole).
+    pub fn alp_encode(vals: &[u64]) -> Option<Vec<u8>> {
+        crate::codecs::alp::encode(vals)
+    }
     pub fn for_bitpack_encode(vals: &[u64]) -> Vec<u8> {
         crate::codecs::for_bitpack::encode(vals, false)
     }

@@ -59,4 +59,23 @@ fn main() {
     println!("\nTOTAL codes:  {} → {} ({:.1}% saved)   rights: {} → {} ({:.1}% saved)",
              tot_craw, tot_cbest, 100.0 * (tot_craw - tot_cbest) as f64 / tot_craw.max(1) as f64,
              tot_rraw, tot_rbest, 100.0 * (tot_rraw.saturating_sub(tot_rbest)) as f64 / tot_rraw.max(1) as f64);
+
+    // ---- ALP: lower-bound gauge — entropy the whole bit-packed output (incl.
+    // incompressible metadata, so true digit savings are higher). ----
+    println!("\n=== ALP whole-output entropy (lower bound on digits→entropy) ===");
+    println!("{:<22} {:>10} {:>10} {:>8}", "column", "alp bytes", "+entropy", "save%");
+    for c in cols {
+        let path = Path::new(&dir).join(format!("{c}.bin"));
+        if !path.exists() { continue; }
+        let mut data = load(&path);
+        data.truncate(2_000_000);
+        let Some(alp) = bi::alp_encode(&data) else {
+            println!("{c:<22} (ALP n/a)"); continue;
+        };
+        let rans = bi::rans_compress(&alp).map(|v| v.len() + 1).unwrap_or(alp.len());
+        let rc = bi::rc_compress(&alp).len() + 1;
+        let best = alp.len().min(rans).min(rc);
+        println!("{c:<22} {:>10} {:>10} {:>7.1}%", alp.len(), best,
+                 100.0 * (alp.len() - best) as f64 / alp.len() as f64);
+    }
 }
