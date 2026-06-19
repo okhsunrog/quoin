@@ -99,6 +99,29 @@ fn choose_cut(vals: &[u64]) -> Option<u32> {
     }
 }
 
+/// Diagnostic (cascade-lab): the raw `(codes, rights)` integer streams for a
+/// block, before they're bit-packed — so the lab can measure whether entropy-
+/// coding them beats the current raw `for_bitpack`. Mirrors `encode`'s split.
+pub(crate) fn debug_streams(vals: &[u64]) -> Option<(Vec<u64>, Vec<u64>)> {
+    if vals.is_empty() {
+        return None;
+    }
+    let left_bw = choose_cut(vals)?;
+    let right_bw = 64 - left_bw;
+    let mask = right_mask(right_bw);
+    let freq = left_freq(vals.iter(), right_bw);
+    let (dict, _) = top_dict(&freq);
+    let code_of: HashMap<u64, u32> =
+        dict.iter().enumerate().map(|(i, &v)| (v, i as u32)).collect();
+    let mut codes = Vec::with_capacity(vals.len());
+    let mut rights = Vec::with_capacity(vals.len());
+    for &v in vals {
+        rights.push(v & mask);
+        codes.push(u64::from(code_of.get(&(v >> right_bw)).copied().unwrap_or(0)));
+    }
+    Some((codes, rights))
+}
+
 pub(crate) fn encode(vals: &[u64]) -> Option<Vec<u8>> {
     if vals.is_empty() {
         return None;

@@ -593,6 +593,11 @@ pub mod bench_internals {
         crate::transform::byte_transpose(src, n, dst);
     }
 
+    /// Cascade-lab: the raw (codes, rights) streams ALP-RD currently bit-packs,
+    /// so the lab can measure whether entropy-coding them is smaller.
+    pub fn alp_rd_streams(vals: &[u64]) -> Option<(Vec<u64>, Vec<u64>)> {
+        crate::codecs::alp_rd::debug_streams(vals)
+    }
     pub fn for_bitpack_encode(vals: &[u64]) -> Vec<u8> {
         crate::codecs::for_bitpack::encode(vals, false)
     }
