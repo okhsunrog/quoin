@@ -90,111 +90,20 @@ biases toward cheap-to-decode modes).
   interleaved **rANS** (much faster decode), and an **LZ-over-residual** cascade
   (`Max` only).
 
-## How it works — algorithms & optimizations
+## How it works
 
-### The block pipeline
+quoin lowers each typed column to a single `u64` lane, splits it into independent
+**blocks**, and runs a **per-block competition**: every applicable codec encodes the
+block and the smallest wins, scored by `size + λ·decode_cost`. The pool is
+type-specialized (frame-of-reference + bit-packing and delta cascades for integers;
+ALP / ALP-RD / FLOAT_MULT and a numeric latent backend for floats and decimals);
+three entropy coders (a 4-way **rANS**, an order-1 **range coder**, and an
+**LZ-over-residual cascade**) and an order-1 estimate gate keep the search cheap.
+The level knob dials how much of this competes.
 
-A column is split into independent **blocks**. Each block is compressed on its
-own — its own winning codec, its own entropy coder — which is what makes encode
-and decode embarrassingly parallel (one rayon task per block) and gives
-random-access at block granularity. Block size is **adaptive** (a ~256 KiB base
-that grows toward ~1 MiB when the data looks low-entropy, so cheap columns pay
-less framing overhead) or pinned via `Config.block_size` to line up with your
-storage chunks.
-
-The on-wire frame is just `[mode byte | payload]` per block; an unknown mode is a
-hard decode error, never a silent zero-fill.
-
-### Lanes & zero-copy lowering
-
-Every typed column is lowered to a single physical **lane** the codec engine
-operates on — almost always a `u64` lane:
-
-- `f64` / `i64` / `u64` → **reinterpreted to `u64` with zero copies** (a bit-cast
-  of the slice, no allocation, no byte shuffling).
-- `i32` is sign-extended, `u32` zero-extended, `f32` exact-widened to `f64` then
-  bit-cast — and narrowed back losslessly on decode.
-- Decimals ride a dedicated 128/256-bit container that preserves precision/scale.
-
-Working in one lane width means the integer codecs (FoR, delta, bit-pack) are
-written once and apply to *every* integer-family type. Floats are XOR/predictor
-material in their raw bit-pattern; "floats that are really decimals" get caught
-by the float-value codecs below.
-
-### Frame-of-reference + FastLanes bit-packing
-
-The integer workhorse (`ForBitpack`). For each 1024-value sub-block it subtracts
-the block minimum (frame of reference), computes the bit-width of the residual
-range, and **bit-packs** to exactly that many bits per value. The packing uses the
-**FastLanes** transposed 1024-lane layout: values are interleaved across lanes so
-the unpack is a straight-line, branch-free, autovectorizable shift-and-mask —
-no per-value branching. `DeltaBitpack` runs the same machinery on first-order
-deltas (Parquet's `DELTA_BINARY_PACKED`) for monotone/clustered columns.
-
-### Delta cascades & predictors
-
-- **Ordered deltas** (`OrderedDelta`, `Delta2`): first/second-order differences
-  turn ramps and smooth signals into small residuals; zig-zag maps signed deltas
-  to small unsigned ints before entropy coding.
-- **FCM / DFCM predictors** (`Pred`, `Pred2`, `PredRc`): a finite-context-model
-  hash predicts the next value from recent history; only the **XOR residual**
-  between prediction and actual is stored, which collapses to near-zero on
-  predictable streams. The hash uses a hardware CRC32 instruction where available.
-- **`DeltaDp`**: second-order linear prediction in float space, storing the exact
-  float residual — and the encoder *verifies* the reconstruction is bit-identical
-  before choosing it, so "lossless" is a guarantee, not a hope.
-
-### ALP & ALP-RD for floating point
-
-Real-world doubles are often decimals in disguise (prices, temperatures, sensor
-readings). **ALP** detects the common decimal exponent, multiplies values into
-integers, and hands those to FoR+bit-packing — with a side list of *exceptions*
-for the few values that don't fit, so it's robust to outliers. **ALP-RD**
-("real double") handles the harder case by splitting each double into a small
-dictionary of high bits plus bit-packed low bits. Together they're why quoin
-crushes columns like `city_temperature` (8.7×) that byte-LZ can only nibble at.
-
-### Entropy coding
-
-Residuals from any stage are squeezed by one of three back-ends, chosen by level:
-
-- **Range coder** — bit-serial, adaptive order-1 byte model. Best ratio, but
-  ~8 model updates per byte, so it's the slow/high-ratio option.
-- **rANS** — table-driven ANS run as **four interleaved chains**, so independent
-  table lookups keep the CPU's execution ports busy and decode is far faster than
-  the range coder at a small ratio cost. This is the default at `Balanced`.
-- **LZ-over-residual cascade** (`Max` only) — when residuals *still* contain
-  repeats, an LZ77 pass runs over them before entropy coding, stacking
-  dictionary-style gains on top of the numeric model.
-
-### The cost-aware selector — the "smart" part
-
-The competition isn't "try everything blindly." A few optimizations keep it both
-small *and* fast:
-
-- **Decode-cost-weighted scoring.** Each candidate is scored
-  `payload_size + (λ · decode_weight · decoded_bytes) >> 8`. With `λ = 0` (High/Max)
-  the smallest output always wins; at faster levels a non-zero `λ` and a
-  per-mode `decode_weight` table bias the choice toward modes that are cheap to
-  *decode*, so you can buy decode speed by spending a little ratio — explicitly,
-  per level.
-- **Early-out for incompressible blocks.** Before running the pool, a block
-  that's already high-distinct with full-width value *and* delta ranges is
-  recognized as hopeless and emitted as `Raw` immediately — no wasted codec trials.
-- **Level-gated pool.** Expensive, non-vectorizable modes (sequential predictors,
-  the LZ cascade, the pco backend) only enter the competition at the levels that
-  ask for them, so `Fastest`/`Balanced` stay genuinely fast.
-- **Optional sampling selector** (`Selection::Sample`): instead of fully encoding
-  every candidate, it can score them on a representative sample of the block and
-  commit only the winner — trading a sliver of ratio for a big encode speedup.
-
-### The pco numeric backend
-
-At `High`/`Max`, the vendored **pcodec** (`Pco` mode) joins the competition for
-numeric columns: it decomposes values into latent streams, bin-packs them, and
-ANS-codes the result — frequently the ratio winner on smooth numeric data. Its
-three vectorizable decode leaves are `multiversion`-compiled (see below), so it
-decodes fast even on a stock build.
+**The full internal design — module map, the encode/decode pipeline, the codec
+list, the entropy & cascade layer, the stream format, parallelism, and the SIMD
+strategy — lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).**
 
 ## Apache Arrow integration & advantages over Parquet
 
@@ -379,25 +288,17 @@ LZ baselines encode quicker (at far lower ratio) while quoin still out-encodes
 
 ## Performance: SIMD, multiversion, rayon
 
-- **rayon block-parallelism** (default `parallel` feature). Blocks are
-  independent, so encode and decode fan out across cores via rayon — `Config.threads`
-  caps the pool, `None` uses the global one. This is why quoin's throughput scales
-  with column size and why its decode beats single-threaded zstd/zlib above.
-- **`multiversion` per-CPU clones.** The lane-wise maps (delta, transpose,
-  bit-planes) and the vendored pco backend's three vectorizable decode leaves
-  (offset bit-unpack, latent reconstruct, center-toggle) are compiled into
-  AVX2+BMI2 / AVX2 / SSE4.2 / NEON variants selected at run time. A **stock build
-  gets the vectorized fast path without `-C target-cpu=native`** *and* still runs
-  on older CPUs via the scalar baseline clone — on a profiled `sensor_f64` decode
-  this recovered **+27%** over the non-native pco build, beating even a `native`
-  build.
-- **Raw `core::arch` intrinsics** for the hot, irregular kernels (the FCM
-  predictor hash uses `_mm_crc32_u64` with runtime feature detection); everything
-  else is plain scalar Rust left to LLVM's autovectorizer.
+- **Block-parallel** encode/decode via rayon (default `parallel` feature; compiles
+  fully single-threaded without it).
+- **`multiversion` per-CPU clones** for the lane-wise maps and the pco decode
+  leaves — the vectorized fast path is selected at run time, so a **stock build
+  gets it without `-C target-cpu=native`** and still runs on older CPUs via the
+  scalar clone (recovered **+27%** on a profiled `sensor_f64` decode).
+- **Raw `core::arch` intrinsics** for the hot irregular kernels (the FCM hash uses
+  `_mm_crc32_u64` with runtime detection); everything else is autovectorized.
 
-Unlike the C original (x86-only, UB on unknown input), **every SIMD kernel has a
-bit-exact scalar fallback**, so a stream decodes identically regardless of CPU,
-and unknown block modes are a hard error rather than silently decoding to zeros.
+Every SIMD kernel has a **bit-exact scalar fallback** — a stream decodes
+identically regardless of CPU. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#12-simd-strategy).
 
 ## Compression levels
 
@@ -406,13 +307,24 @@ A five-step speed/ratio knob (a decode-cost-class ladder):
 | Level | Pool | Decode | Ratio |
 | --- | --- | --- | --- |
 | **Fastest** | RAW/CONST/STRIDE + FoR/delta bit-pack | random-access, fastest | lowest |
-| **Fast** | + XORZ / ALP / dict / RLE | random-access | moderate |
-| **Balanced** | + rANS entropy on vectorizable modes | no recurrence, fast | good |
-| **High** | + sequential predictors + range coder + **pco** | slower | near-best |
+| **Fast** | + XORZ / ALP / ALP-RD / dict / RLE | random-access | moderate |
+| **Balanced** | + rANS entropy + **pco** (fast decode) | no recurrence, fast | good |
+| **High** | + sequential predictors + range coder | slower | near-best |
 | **Max** (default) | + LZ-over-residual cascade (`λ = 0`) | slowest | best |
 
 Block sizing is adaptive by default or pinned via `Config.block_size` for
 storage-chunk alignment and random access.
+
+## Documentation
+
+| Document | What's in it |
+| --- | --- |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the engine works internally — module map, encode/decode pipeline, codecs, entropy & cascades, stream format, parallelism, SIMD. |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Full benchmark numbers and methodology. |
+| [ROADMAP.md](ROADMAP.md) | What's done, what's next, known gaps. |
+| [docs/TYPES.md](docs/TYPES.md) | The type system and Arrow type mapping. |
+| [docs/LANDSCAPE.md](docs/LANDSCAPE.md) | Competitive context (Vortex, BtrBlocks, FastLanes, ALP, pco). |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Performance notes and the speed/ratio-knob rationale. |
 
 ## Building
 
