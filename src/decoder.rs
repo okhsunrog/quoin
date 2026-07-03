@@ -62,6 +62,17 @@ pub(crate) fn decompress_lane(src: &[u8]) -> Result<DecodedLane, Error> {
         None => logical_n,
     };
 
+    // Shared-dictionary preamble (if any) follows the validity section: the
+    // column-wide value table, decoded once and shared read-only by the frames.
+    let shared: Option<Vec<u64>> = if header.has_shared_dict {
+        let plen = usize::try_from(crate::varint::read_u64(src, &mut pos)?)
+            .map_err(|_| Error::CorruptPayload("shared dict preamble too large"))?;
+        let blob = take(src, &mut pos, plen)?;
+        Some(dict::decode_shared_preamble(blob, n_total)?)
+    } else {
+        None
+    };
+
     // Phase 1: scan frame boundaries (sequential, cheap, fully validated).
     let mut frames: Vec<Frame<'_>> = Vec::new();
     let mut counted = 0usize;
@@ -94,7 +105,7 @@ pub(crate) fn decompress_lane(src: &[u8]) -> Result<DecodedLane, Error> {
     }
 
     // Phase 2: decode blocks (parallel when enabled), then concatenate in order.
-    let mut decoded = decode_frames(&frames, predictor_log2, header.dtype)?;
+    let mut decoded = decode_frames(&frames, predictor_log2, header.dtype, shared.as_deref())?;
 
     // Single block (common for small columns / a large fixed `block_size`): move
     // its buffer out instead of copying it into a fresh lane.
@@ -122,11 +133,12 @@ fn decode_frames(
     frames: &[Frame<'_>],
     predictor_log2: u8,
     dtype: DType,
+    shared: Option<&[u64]>,
 ) -> Result<Vec<Vec<u64>>, Error> {
     use rayon::prelude::*;
     frames
         .par_iter()
-        .map(|f| decode_frame(f, predictor_log2, dtype))
+        .map(|f| decode_frame(f, predictor_log2, dtype, shared))
         .collect()
 }
 
@@ -135,14 +147,20 @@ fn decode_frames(
     frames: &[Frame<'_>],
     predictor_log2: u8,
     dtype: DType,
+    shared: Option<&[u64]>,
 ) -> Result<Vec<Vec<u64>>, Error> {
     frames
         .iter()
-        .map(|f| decode_frame(f, predictor_log2, dtype))
+        .map(|f| decode_frame(f, predictor_log2, dtype, shared))
         .collect()
 }
 
-fn decode_frame(f: &Frame<'_>, predictor_log2: u8, dtype: DType) -> Result<Vec<u64>, Error> {
+fn decode_frame(
+    f: &Frame<'_>,
+    predictor_log2: u8,
+    dtype: DType,
+    shared: Option<&[u64]>,
+) -> Result<Vec<u64>, Error> {
     let (payload, n) = (f.payload, f.n);
     Ok(match f.mode {
         Mode::Raw => raw::decode(payload, n, dtype)?,
@@ -184,6 +202,12 @@ fn decode_frame(f: &Frame<'_>, predictor_log2: u8, dtype: DType) -> Result<Vec<u
         Mode::DeltaBitpack => delta_bitpack::decode(payload, n)?,
         Mode::AlpRd => alp_rd::decode(payload, n)?,
         Mode::Dict => dict::decode(payload, n)?,
+        Mode::DictShared => {
+            let table = shared.ok_or(Error::CorruptPayload(
+                "shared-dict frame without a preamble",
+            ))?;
+            dict::decode_shared(payload, n, table)?
+        }
         Mode::Rle => rle::decode(payload, n)?,
         Mode::Pco => pcodec::decode(payload, n, dtype)?,
     })

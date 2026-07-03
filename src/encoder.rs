@@ -81,7 +81,7 @@ fn decode_weight(mode: Mode) -> u64 {
     match mode {
         Mode::Raw | Mode::Const | Mode::Stride => 0,
         Mode::Xorz | Mode::ForBitpack | Mode::DeltaBitpack | Mode::Rle => 1,
-        Mode::Alp | Mode::AlpRd | Mode::Dict => 2,
+        Mode::Alp | Mode::AlpRd | Mode::Dict | Mode::DictShared => 2,
         Mode::Pred => 3,
         Mode::ByteTranspose | Mode::FloatMult => 6,
         Mode::OrderedDelta | Mode::Delta2 | Mode::DeltaDp | Mode::Lz | Mode::Pco => 7,
@@ -201,15 +201,52 @@ pub(crate) fn compress_lane(
     cfg: Config,
 ) -> Vec<u8> {
     let predictor_log2 = cfg.clamped_predictor_log2();
+    let level = cfg.level;
+    let ranges = plan_blocks(vals, cfg.fixed_block_size(), level);
 
-    let frames = build_frames(vals, predictor_log2, dtype, &cfg);
+    // Column-wide shared value dictionary: only worth probing on multi-block
+    // columns (a single block already sees the whole column), at the ratio-first
+    // levels, under `Full` selection (the sampled path doesn't rank it).
+    let shared = if cfg.selection == Selection::Full && level.full_blocks() && ranges.len() >= 2 {
+        dict::build_shared(
+            vals,
+            level.allows_entropy(),
+            level.lambda(),
+            level.allows_lz_cascade(),
+        )
+    } else {
+        None
+    };
 
-    let total: usize = frames.iter().map(Vec::len).sum();
+    let mut results = build_frames(vals, &ranges, predictor_log2, dtype, &cfg, shared.as_ref());
+
+    // Net-win gate: the preamble is stored once, so it pays only when the blocks
+    // that chose DICT_SHARED saved more (vs their runner-up) than it costs.
+    // Otherwise re-encode just those blocks without the shared candidate.
+    let mut emit_shared = false;
+    if let Some(sd) = &shared {
+        let total_gain: usize = results.iter().map(|r| r.1).sum();
+        let mut lenbuf = Vec::with_capacity(5);
+        crate::varint::write_u64(&mut lenbuf, sd.preamble.len() as u64);
+        if total_gain > sd.preamble.len() + lenbuf.len() {
+            emit_shared = true;
+        } else {
+            for (i, &(s, e)) in ranges.iter().enumerate() {
+                if results[i].1 > 0 {
+                    results[i] =
+                        encode_block(&vals[s..e], predictor_log2, cfg.selection, dtype, level, None);
+                }
+            }
+        }
+    }
+
+    let total: usize = results.iter().map(|r| r.0.len()).sum();
     let mut out = Vec::with_capacity(crate::format::HEADER_LEN + total + 16);
     Header {
         predictor_log2,
         dtype,
         has_validity: validity.is_some(),
+        has_shared_dict: emit_shared,
         n_values: logical_n as u64,
     }
     .write(&mut out);
@@ -219,21 +256,37 @@ pub(crate) fn compress_lane(
         crate::varint::write_u64(&mut out, vblob.len() as u64);
         out.extend_from_slice(&vblob);
     }
-    for f in &frames {
+    // Shared-dictionary preamble follows the validity section.
+    if emit_shared && let Some(sd) = &shared {
+        crate::varint::write_u64(&mut out, sd.preamble.len() as u64);
+        out.extend_from_slice(&sd.preamble);
+    }
+    for (f, _) in &results {
         out.extend_from_slice(f);
     }
     out
 }
 
+/// A built frame plus its shared-dictionary gain: how many score units the
+/// block saved by choosing `DICT_SHARED` over its runner-up (0 for every other
+/// winner). Summed by the column-level net-win gate against the preamble cost.
+type FrameResult = (Vec<u8>, usize);
+
 #[cfg(feature = "parallel")]
-fn build_frames(vals: &[u64], predictor_log2: u8, dtype: DType, cfg: &Config) -> Vec<Vec<u8>> {
+fn build_frames(
+    vals: &[u64],
+    ranges: &[(usize, usize)],
+    predictor_log2: u8,
+    dtype: DType,
+    cfg: &Config,
+    shared: Option<&dict::SharedDict>,
+) -> Vec<FrameResult> {
     use rayon::prelude::*;
     let (sel, level) = (cfg.selection, cfg.level);
-    let ranges = plan_blocks(vals, cfg.fixed_block_size(), level);
     let run = || {
         ranges
             .par_iter()
-            .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, sel, dtype, level))
+            .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, sel, dtype, level, shared))
             .collect::<Vec<_>>()
     };
     match cfg.threads {
@@ -246,10 +299,19 @@ fn build_frames(vals: &[u64], predictor_log2: u8, dtype: DType, cfg: &Config) ->
 }
 
 #[cfg(not(feature = "parallel"))]
-fn build_frames(vals: &[u64], predictor_log2: u8, dtype: DType, cfg: &Config) -> Vec<Vec<u8>> {
-    plan_blocks(vals, cfg.fixed_block_size(), cfg.level)
+fn build_frames(
+    vals: &[u64],
+    ranges: &[(usize, usize)],
+    predictor_log2: u8,
+    dtype: DType,
+    cfg: &Config,
+    shared: Option<&dict::SharedDict>,
+) -> Vec<FrameResult> {
+    ranges
         .iter()
-        .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, cfg.selection, dtype, cfg.level))
+        .map(|&(s, e)| {
+            encode_block(&vals[s..e], predictor_log2, cfg.selection, dtype, cfg.level, shared)
+        })
         .collect()
 }
 
@@ -259,10 +321,11 @@ fn encode_block(
     sel: Selection,
     dtype: DType,
     level: Level,
-) -> Vec<u8> {
+    shared: Option<&dict::SharedDict>,
+) -> FrameResult {
     match sel {
-        Selection::Full => encode_block_full(block, predictor_log2, dtype, level),
-        Selection::Sample => encode_block_sampled(block, predictor_log2, dtype, level),
+        Selection::Full => encode_block_full(block, predictor_log2, dtype, level, shared),
+        Selection::Sample => (encode_block_sampled(block, predictor_log2, dtype, level), 0),
     }
 }
 
@@ -284,7 +347,13 @@ fn coded_if_competitive(
     Some(code_residuals(res, lambda, allow_lz))
 }
 
-fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Level) -> Vec<u8> {
+fn encode_block_full(
+    block: &[u64],
+    predictor_log2: u8,
+    dtype: DType,
+    level: Level,
+    shared: Option<&dict::SharedDict>,
+) -> FrameResult {
     let family = dtype.family();
     let entropy = level.allows_entropy();
     let predictors = level.allows_predictors();
@@ -306,7 +375,10 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
     // trying (ALP/ALP-RD/predictors can win on data this probe can't read).
     if family == Family::Int && looks_incompressible(block, &feats, dtype.lane_bytes()) {
         crate::diag::record_win(Mode::Raw.id());
-        return frame_bytes(Mode::Raw, block.len(), &raw::encode(block, dtype));
+        return (
+            frame_bytes(Mode::Raw, block.len(), &raw::encode(block, dtype)),
+            0,
+        );
     }
 
     // RAW is the always-available baseline; every other mode must beat its score.
@@ -353,6 +425,19 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
         if let Some(p) = alp_rd::encode(block, entropy, lambda, allow_lz) {
             best.consider(Mode::AlpRd, p);
         }
+    }
+
+    // Shared-dictionary codes (when the column-wide table exists): cheap (a hash
+    // lookup per value + the codes section) and often *the* tight incumbent on
+    // cross-block repeated values, so it runs before the expensive predictors —
+    // like the other cheap strong modes, this is what lets the estimate gate
+    // prune. Not hung off `block_compressible`: that measures other codecs'
+    // success and would mask exactly the columns this mode exists for.
+    if !reduced
+        && let Some(sd) = shared
+        && let Some(p) = dict::encode_shared(block, sd, entropy, lambda, allow_lz)
+    {
+        best.consider(Mode::DictShared, p);
     }
 
     // The sequential PREDICTORS (FCM/DFCM, polynomial-float, 2nd-order int) live at
@@ -469,15 +554,24 @@ fn encode_block_full(block: &[u64], predictor_log2: u8, dtype: DType, level: Lev
     if cascade_lz {
         for m in [Some(best.mode), best.runner_mode].into_iter().flatten() {
             if mode_cascades_lz(m)
-                && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level)
+                && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, shared)
             {
                 best.consider(m, p);
             }
         }
     }
 
+    // The shared-dictionary gain: what this block saved over its best
+    // alternative by using the column-wide table. The column-level gate sums
+    // these against the preamble cost.
+    let gain = if best.mode == Mode::DictShared && best.runner_mode.is_some() {
+        best.runner_score.saturating_sub(best.score)
+    } else {
+        0
+    };
+
     crate::diag::record_win(best.mode.id());
-    frame_bytes(best.mode, block.len(), &best.payload)
+    (frame_bytes(best.mode, block.len(), &best.payload), gain)
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +643,7 @@ fn mode_cascades_lz(mode: Mode) -> bool {
             | Mode::Lz
             | Mode::ByteTranspose
             | Mode::Dict
+            | Mode::DictShared
     )
 }
 
@@ -558,6 +653,7 @@ fn encode_mode(
     predictor_log2: u8,
     dtype: DType,
     level: Level,
+    shared: Option<&dict::SharedDict>,
 ) -> Option<Vec<u8>> {
     let lambda = level.lambda();
     let allow_lz = level.allows_lz_cascade();
@@ -586,6 +682,9 @@ fn encode_mode(
         Mode::Alp => alp::encode(block),
         Mode::AlpRd => alp_rd::encode(block, entropy, lambda, allow_lz),
         Mode::Dict => dict::encode(block, entropy, lambda, allow_lz),
+        Mode::DictShared => {
+            shared.and_then(|sd| dict::encode_shared(block, sd, entropy, lambda, allow_lz))
+        }
         Mode::Rle => rle::encode(block),
         Mode::DeltaBitpack => Some(delta_bitpack::encode(block)),
         Mode::Pco => pcodec::encode(block, dtype, level.pco_level()),
@@ -604,7 +703,7 @@ fn encode_block_sampled(block: &[u64], predictor_log2: u8, dtype: DType, level: 
     );
 
     let consider_full = |m: Mode, best: &mut Best| {
-        if let Some(p) = encode_mode(m, block, predictor_log2, dtype, level) {
+        if let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, None) {
             best.consider(m, p);
         }
     };
@@ -632,7 +731,7 @@ fn encode_block_sampled(block: &[u64], predictor_log2: u8, dtype: DType, level: 
         .iter()
         .filter(|&&m| mode_runs(m, family, level))
     {
-        if let Some(p) = encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level)
+        if let Some(p) = encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None)
             && p.len() < win_est
         {
             win_est = p.len();
@@ -640,7 +739,7 @@ fn encode_block_sampled(block: &[u64], predictor_log2: u8, dtype: DType, level: 
         }
     }
     if let Some(m) = win
-        && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level)
+        && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, None)
     {
         best.consider(m, p);
     }

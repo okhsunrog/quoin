@@ -50,6 +50,10 @@ pub enum Mode {
     /// Vendored pco (pcodec) numeric backend: latent decomposition + bin-packing
     /// + ANS. Heavyweight ratio mode, gated to `High`/`Max`.
     Pco = 54,
+    /// Dictionary codes into the **column-wide shared value table** (the
+    /// stream's shared-dictionary preamble). Captures cross-block value repeats
+    /// that per-block `Dict` pays the dictionary for once per block.
+    DictShared = 55,
 }
 
 impl Mode {
@@ -79,6 +83,7 @@ impl Mode {
             19 => Mode::Dict,
             53 => Mode::Rle,
             54 => Mode::Pco,
+            55 => Mode::DictShared,
             other => return Err(Error::UnknownMode(other)),
         })
     }
@@ -141,6 +146,7 @@ pub fn mode_name(id: u8) -> &'static str {
         52 => "ALP_RD",
         53 => "RLE",
         54 => "PCO",
+        55 => "DICT_SHARED",
         _ => "?",
     }
 }

@@ -14,11 +14,21 @@
 //!   (byte-transpose → entropy, exploiting shared high bytes of similar-magnitude
 //!   decimals). For high-cardinality columns the raw dictionary dominates the
 //!   output, so compressing it is the bigger win.
+//!
+//! The **shared** variant ([`build_shared`] / [`encode_shared`]) lifts the value
+//! table to a column-wide preamble stored once per stream; `DICT_SHARED` frames
+//! hold only the codes section. This wins when the same values recur across
+//! blocks: per-block `Dict` pays the dictionary per block (or loses the
+//! competition because of it), while the shared table amortizes it — measured
+//! +50% ratio on `poi_lat` (repeated-coordinate data, ~100 K distinct across
+//! 424 K values). Blocks stay independently decodable given the (read-only)
+//! table, so parallel decode is preserved.
 
 use crate::codecs::{delta_bitpack, for_bitpack, transpose};
 use crate::entropy::{code_residuals, decode_residuals};
 use crate::error::Error;
 use crate::varint;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 const CODES_BITPACK: u8 = 0;
@@ -37,7 +47,12 @@ fn plane_count(card: usize) -> usize {
 
 /// Encode the (sorted) dictionary values, smallest of raw / delta→bitpack /
 /// transpose→entropy. Returns `(tag, blob)`.
-fn encode_values(sorted: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -> (u8, Vec<u8>) {
+pub(crate) fn encode_values(
+    sorted: &[u64],
+    entropy: bool,
+    lambda: u64,
+    allow_lz: bool,
+) -> (u8, Vec<u8>) {
     let mut raw = Vec::with_capacity(sorted.len() * 8);
     for &d in sorted {
         raw.extend_from_slice(&d.to_le_bytes());
@@ -61,7 +76,7 @@ fn encode_values(sorted: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -> 
 }
 
 /// Inverse of [`encode_values`] — reconstruct `card` dictionary values.
-fn decode_values(tag: u8, blob: &[u8], card: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn decode_values(tag: u8, blob: &[u8], card: usize) -> Result<Vec<u64>, Error> {
     match tag {
         VAL_RAW => {
             if blob.len() != card * 8 {
@@ -121,13 +136,30 @@ pub(crate) fn encode(vals: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -
     }
 
     let (val_tag, val_blob) = encode_values(&sorted, entropy, lambda, allow_lz);
+    let codes_section = encode_codes_section(&codes, sorted.len(), entropy, lambda, allow_lz);
 
-    // Pick the smaller code representation: bit-packed (random-access) or, when
-    // the level allows entropy, byte-plane entropy-coded.
+    let mut out = Vec::with_capacity(val_blob.len() + codes_section.len() + 16);
+    varint::write_u64(&mut out, sorted.len() as u64);
+    out.push(val_tag);
+    varint::write_u64(&mut out, val_blob.len() as u64);
+    out.extend_from_slice(&val_blob);
+    out.extend_from_slice(&codes_section);
+    Some(out)
+}
+
+/// Encode the codes stream: `code_tag ++ blob` — the smaller of bit-packed
+/// (random-access) or, when the level allows entropy, byte-plane entropy-coded.
+fn encode_codes_section(
+    codes: &[u64],
+    card: usize,
+    entropy: bool,
+    lambda: u64,
+    allow_lz: bool,
+) -> Vec<u8> {
     let mut code_tag = CODES_BITPACK;
-    let mut code_blob = for_bitpack::encode(&codes, false);
-    if entropy && sorted.len() <= MAX_ENTROPY_CARD {
-        let nbytes = plane_count(sorted.len());
+    let mut code_blob = for_bitpack::encode(codes, false);
+    if entropy && card <= MAX_ENTROPY_CARD {
+        let nbytes = plane_count(card);
         let mut blob = vec![nbytes as u8];
         for p in 0..nbytes {
             let plane: Vec<u8> = codes.iter().map(|&c| (c >> (8 * p)) as u8).collect();
@@ -140,37 +172,19 @@ pub(crate) fn encode(vals: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -
             code_blob = blob;
         }
     }
-
-    let mut out = Vec::with_capacity(val_blob.len() + code_blob.len() + 16);
-    varint::write_u64(&mut out, sorted.len() as u64);
-    out.push(val_tag);
-    varint::write_u64(&mut out, val_blob.len() as u64);
-    out.extend_from_slice(&val_blob);
+    let mut out = Vec::with_capacity(code_blob.len() + 1);
     out.push(code_tag);
     out.extend_from_slice(&code_blob);
-    Some(out)
+    out
 }
 
-pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+/// Inverse of [`encode_codes_section`]: decode `n` codes from `code_tag ++ blob`.
+fn decode_codes_section(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
     let mut pos = 0usize;
-    let card = varint::read_u64(payload, &mut pos)? as usize;
-    if card > n {
-        return Err(Error::CorruptPayload(
-            "dict cardinality exceeds value count",
-        ));
-    }
-    let val_tag = *payload.get(pos).ok_or(Error::Truncated)?;
-    pos += 1;
-    let val_len = varint::read_u64(payload, &mut pos)? as usize;
-    let val_blob = payload.get(pos..pos + val_len).ok_or(Error::Truncated)?;
-    pos += val_len;
-    let dict = decode_values(val_tag, val_blob, card)?;
-
     let tag = *payload.get(pos).ok_or(Error::Truncated)?;
     pos += 1;
-
-    let codes: Vec<u64> = match tag {
-        CODES_BITPACK => for_bitpack::decode(&payload[pos..], n, false)?,
+    match tag {
+        CODES_BITPACK => for_bitpack::decode(&payload[pos..], n, false),
         CODES_ENTROPY => {
             let nbytes = usize::from(*payload.get(pos).ok_or(Error::Truncated)?);
             pos += 1;
@@ -190,10 +204,28 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
                     *c |= u64::from(b) << (8 * p);
                 }
             }
-            codes
+            Ok(codes)
         }
-        _ => return Err(Error::CorruptPayload("dict code tag")),
-    };
+        _ => Err(Error::CorruptPayload("dict code tag")),
+    }
+}
+
+pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+    let mut pos = 0usize;
+    let card = varint::read_u64(payload, &mut pos)? as usize;
+    if card > n {
+        return Err(Error::CorruptPayload(
+            "dict cardinality exceeds value count",
+        ));
+    }
+    let val_tag = *payload.get(pos).ok_or(Error::Truncated)?;
+    pos += 1;
+    let val_len = varint::read_u64(payload, &mut pos)? as usize;
+    let val_blob = payload.get(pos..pos + val_len).ok_or(Error::Truncated)?;
+    pos += val_len;
+    let dict = decode_values(val_tag, val_blob, card)?;
+
+    let codes = decode_codes_section(&payload[pos..], n)?;
 
     let mut out = Vec::with_capacity(n);
     for c in codes {
@@ -202,6 +234,132 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
             return Err(Error::CorruptPayload("dict code out of range"));
         }
         out.push(dict[idx]);
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Shared (column-wide) dictionary: the value table lives once in the stream
+// preamble; DICT_SHARED frames carry only a codes section into it.
+// ---------------------------------------------------------------------------
+
+/// Cap on the shared table's cardinality — bounds the encoder's hash pass and
+/// the table memory; columns with more distinct values than this don't benefit
+/// from value sharing anyway (the codes approach raw width).
+const SHARED_MAX_CARD: usize = 1 << 20;
+
+/// Column-wide dictionary context, built once per column by the encoder and
+/// shared (read-only) across the per-block competitions.
+pub(crate) struct SharedDict {
+    /// value → code in the sorted table.
+    map: FxHashMap<u64, u32>,
+    /// Cardinality of the table.
+    pub(crate) card: usize,
+    /// Encoded preamble body: `varint(card) ++ val_tag ++ varint(len) ++ blob`.
+    pub(crate) preamble: Vec<u8>,
+}
+
+/// Build the column-wide table over the full (valid-values) lane, or `None`
+/// when the column is too high-cardinality to profit (> 50% distinct, like the
+/// per-block bail) or exceeds [`SHARED_MAX_CARD`].
+pub(crate) fn build_shared(
+    vals: &[u64],
+    entropy: bool,
+    lambda: u64,
+    allow_lz: bool,
+) -> Option<SharedDict> {
+    if vals.is_empty() {
+        return None;
+    }
+    let max_card = (vals.len() / 2 + 1).min(SHARED_MAX_CARD);
+    let mut map: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut dict: Vec<u64> = Vec::new();
+    for &v in vals {
+        map.entry(v).or_insert_with(|| {
+            let c = dict.len() as u32;
+            dict.push(v);
+            c
+        });
+        if dict.len() > max_card {
+            return None;
+        }
+    }
+
+    // Sort ascending and remap (same rationale as the per-block path: a
+    // monotonic table compresses far better, codes are a permutation either way).
+    let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+    order.sort_unstable_by_key(|&i| dict[i as usize]);
+    let mut remap = vec![0u32; dict.len()];
+    for (new, &old) in order.iter().enumerate() {
+        remap[old as usize] = new as u32;
+    }
+    let sorted: Vec<u64> = order.iter().map(|&old| dict[old as usize]).collect();
+    for c in map.values_mut() {
+        *c = remap[*c as usize];
+    }
+
+    let (val_tag, val_blob) = encode_values(&sorted, entropy, lambda, allow_lz);
+    let mut preamble = Vec::with_capacity(val_blob.len() + 12);
+    varint::write_u64(&mut preamble, sorted.len() as u64);
+    preamble.push(val_tag);
+    varint::write_u64(&mut preamble, val_blob.len() as u64);
+    preamble.extend_from_slice(&val_blob);
+    Some(SharedDict {
+        map,
+        card: sorted.len(),
+        preamble,
+    })
+}
+
+/// Decode the preamble body back to the value table. `n_total` bounds the
+/// cardinality (distinct ≤ valid values) against corrupt streams.
+pub(crate) fn decode_shared_preamble(blob: &[u8], n_total: usize) -> Result<Vec<u64>, Error> {
+    let mut pos = 0usize;
+    let card = varint::read_u64(blob, &mut pos)? as usize;
+    if card == 0 || card > n_total {
+        return Err(Error::CorruptPayload("shared dict cardinality"));
+    }
+    let val_tag = *blob.get(pos).ok_or(Error::Truncated)?;
+    pos += 1;
+    let vlen = varint::read_u64(blob, &mut pos)? as usize;
+    let end = pos.checked_add(vlen).ok_or(Error::Truncated)?;
+    if end != blob.len() {
+        return Err(Error::CorruptPayload("shared dict preamble length"));
+    }
+    decode_values(val_tag, &blob[pos..end], card)
+}
+
+/// Encode one block as codes into the shared table (the frame payload is just a
+/// codes section). Returns `None` on an empty block or a value missing from the
+/// table (impossible for a table built over the same column; defensive).
+pub(crate) fn encode_shared(
+    vals: &[u64],
+    sd: &SharedDict,
+    entropy: bool,
+    lambda: u64,
+    allow_lz: bool,
+) -> Option<Vec<u8>> {
+    if vals.is_empty() {
+        return None;
+    }
+    let mut codes = Vec::with_capacity(vals.len());
+    for v in vals {
+        debug_assert!(sd.map.contains_key(v), "shared dict must cover the column");
+        codes.push(u64::from(*sd.map.get(v)?));
+    }
+    Some(encode_codes_section(&codes, sd.card, entropy, lambda, allow_lz))
+}
+
+/// Decode a `DICT_SHARED` frame given the stream's decoded value table.
+pub(crate) fn decode_shared(payload: &[u8], n: usize, table: &[u64]) -> Result<Vec<u64>, Error> {
+    let codes = decode_codes_section(payload, n)?;
+    let mut out = Vec::with_capacity(n);
+    for c in codes {
+        let idx = c as usize;
+        if idx >= table.len() {
+            return Err(Error::CorruptPayload("shared dict code out of range"));
+        }
+        out.push(table[idx]);
     }
     Ok(out)
 }
@@ -312,5 +470,52 @@ mod tests {
     fn edges() {
         assert!(encode(&[], true, 0, true).is_none());
         roundtrip(&vec![7u64; 1000]);
+    }
+
+    #[test]
+    fn shared_roundtrip_across_blocks() {
+        // A value table too big for any *block* (cardinality > block/2) but
+        // small for the column — the case the shared dictionary exists for.
+        let mut s = 1u64;
+        let table: Vec<u64> = (0..3000)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                s
+            })
+            .collect();
+        let vals: Vec<u64> = (0..40000)
+            .map(|i| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                table[((s >> 40) as usize + i) % table.len()]
+            })
+            .collect();
+
+        for (entropy, lambda) in [(true, 0u64), (true, 2u64), (false, 0u64)] {
+            let sd = build_shared(&vals, entropy, lambda, false).expect("should build");
+            let decoded_table =
+                decode_shared_preamble(&sd.preamble, vals.len()).expect("preamble");
+            assert_eq!(decoded_table.len(), sd.card);
+            for block in vals.chunks(4096) {
+                let payload = encode_shared(block, &sd, entropy, lambda, false).unwrap();
+                let out = decode_shared(&payload, block.len(), &decoded_table).unwrap();
+                assert_eq!(out, block);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_bails_on_high_cardinality() {
+        let vals: Vec<u64> = (0..10000u64).map(|i| i.wrapping_mul(0x9E3779B9)).collect();
+        assert!(build_shared(&vals, true, 0, false).is_none());
+    }
+
+    #[test]
+    fn shared_decode_rejects_out_of_range_code() {
+        let vals = vec![1u64, 2, 3, 1, 2, 3, 1, 2];
+        let sd = build_shared(&vals, false, 0, false).unwrap();
+        let payload = encode_shared(&vals, &sd, false, 0, false).unwrap();
+        // A table shorter than the codes reference must error, not index OOB.
+        let short_table = vec![1u64];
+        assert!(decode_shared(&payload, vals.len(), &short_table).is_err());
     }
 }

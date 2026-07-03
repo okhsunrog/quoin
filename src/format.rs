@@ -9,6 +9,12 @@
 //!   [7]     column type id (see `DType::wire_id`)
 //!   [8..16] value count (u64 LE) — number of values
 //!
+//! Then, if the shared-dictionary flag is set, the column preamble (after the
+//! validity section when both are present):
+//!   varint(preamble length) ++ preamble
+//!   preamble = varint(cardinality) ++ val_tag ++ varint(len) ++ value blob
+//!              (the value blob is `dict.rs`'s compressed sorted-values stream)
+//!
 //! Then one frame per block until `value count` values are decoded:
 //!   [0]      mode id (u8)
 //!   [1..5]   value count for this block (u32 LE)
@@ -34,6 +40,11 @@ pub(crate) const FLAG_VALIDITY: u8 = 0x01;
 /// ordinary [`Header::read`] rejects this flag, so the top-level dispatcher must
 /// route decimal streams to the decimal decoder before reading the header.
 pub(crate) const FLAG_DECIMAL: u8 = 0x02;
+/// Flag bit (header[5]): a **shared value dictionary** preamble follows the
+/// header (after the validity section, when both are present): the column-wide
+/// sorted distinct values, stored once; `DICT_SHARED` frames hold only codes
+/// into it. See [`crate::codecs::dict`].
+pub(crate) const FLAG_SHARED_DICT: u8 = 0x04;
 pub(crate) const FRAME_HEADER_LEN: usize = 9;
 
 /// Maximum values a single block may declare. The encoder grows low-entropy
@@ -48,6 +59,9 @@ pub(crate) struct Header {
     pub dtype: DType,
     /// A validity bitmap follows the header (see [`FLAG_VALIDITY`]).
     pub has_validity: bool,
+    /// A shared-dictionary preamble follows the validity section (see
+    /// [`FLAG_SHARED_DICT`]).
+    pub has_shared_dict: bool,
     /// Logical value count (including nulls).
     pub n_values: u64,
 }
@@ -56,7 +70,14 @@ impl Header {
     pub(crate) fn write(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&MAGIC);
         out.push(VERSION);
-        out.push(if self.has_validity { FLAG_VALIDITY } else { 0 }); // flags
+        let mut flags = 0u8;
+        if self.has_validity {
+            flags |= FLAG_VALIDITY;
+        }
+        if self.has_shared_dict {
+            flags |= FLAG_SHARED_DICT;
+        }
+        out.push(flags);
         out.push(self.predictor_log2);
         out.push(self.dtype.wire_id());
         out.extend_from_slice(&self.n_values.to_le_bytes());
@@ -72,10 +93,11 @@ impl Header {
         if src[4] != VERSION {
             return Err(Error::UnsupportedVersion(src[4]));
         }
-        if src[5] & !FLAG_VALIDITY != 0 {
+        if src[5] & !(FLAG_VALIDITY | FLAG_SHARED_DICT) != 0 {
             return Err(Error::CorruptPayload("unknown header flags"));
         }
         let has_validity = src[5] & FLAG_VALIDITY != 0;
+        let has_shared_dict = src[5] & FLAG_SHARED_DICT != 0;
         // Must match the encoder's clamp; the predictor codecs use this as a
         // shift amount (`1 << predictor_log2`) and table size, so an
         // out-of-range value from a corrupt stream would overflow / over-allocate.
@@ -89,6 +111,7 @@ impl Header {
             predictor_log2,
             dtype,
             has_validity,
+            has_shared_dict,
             n_values,
         })
     }
