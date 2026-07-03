@@ -82,11 +82,15 @@ bit-packers, LZ, transpose, dict, pco) apply to both.
 
 ## 4. Block framing
 
-A column is split by `plan_blocks` (`encoder.rs`): an adaptive base of ~256 KiB
-that grows toward ~1 MiB when a cheap probe says the data is low-entropy
-(dictionary-like / constant / run-heavy), so cheap columns pay less framing
-overhead. A fixed `Config.block_size` pins every block to a row count (for
-storage-chunk alignment / random access).
+A column is split by `plan_blocks` (`encoder.rs`). The **ratio-first levels**
+(`High`/`Max`) use full ~1 MiB blocks outright — the wider LZ/dict/entropy
+window never lost ratio on the corpus (and won up to +14% where the probe
+under-grew), and coarse random access is exactly what those levels trade away.
+The fast levels keep an adaptive base of ~256 KiB that grows toward ~1 MiB only
+when a cheap probe says the data is low-entropy (dictionary-like / constant /
+run-heavy), preserving fine-grained random access and parallelism on noisy
+data. A fixed `Config.block_size` overrides both (for storage-chunk alignment /
+random access).
 
 Each block becomes a **frame**: `[mode byte | payload]`. An unknown mode byte is a
 hard decode error, never a silent zero-fill.
@@ -101,9 +105,10 @@ tight incumbent is established early:
 
 1. **Structural / cheap** — RAW (the baseline every mode must beat), CONST,
    STRIDE, XORZ.
-2. **Cheap strong** — FoR+bitpack, delta+bitpack, and (float) FLOAT_MULT / ALP /
-   ALP-RD. These give a tight `best` *before* the expensive predictors, which is
-   what lets the estimate gate (below) prune.
+2. **Cheap strong** — FoR+bitpack, delta+bitpack, (float) FLOAT_MULT / ALP /
+   ALP-RD, and DICT_SHARED when the column-wide table exists. These give a
+   tight `best` *before* the expensive predictors, which is what lets the
+   estimate gate (below) prune.
 3. **Predictors** (`High`/`Max` only) — FCM/DFCM, polynomial-float, 2nd-order int.
    Each is gated by `coded_if_competitive`: an **order-1 entropy estimate** of its
    residual; the full range-code is skipped when even an optimistic estimate can't
@@ -143,7 +148,7 @@ stream returns `Error`, never panics or over-allocates.
 
 ## 7. Codecs
 
-20 block modes, by family (`mode.rs`, `codecs/`):
+21 block modes, by family (`mode.rs`, `codecs/`):
 
 | Group | Modes | Notes |
 | --- | --- | --- |
@@ -151,9 +156,26 @@ stream returns `Error`, never panics or over-allocates.
 | Integer bit-pack | `ForBitpack`, `DeltaBitpack` | frame-of-reference / delta + FastLanes bit-pack. Random-access, fast decode. |
 | Float value | `Alp`, `AlpRd`, `FloatMult` | doubles that are really decimals → scaled integers (ALP) or split-dictionary (ALP-RD). |
 | Predictors | `Pred`, `PredRc`, `Pred2`, `Delta2`, `DeltaDp`, `OrderedDelta` | FCM/DFCM hash + XOR residual; polynomial-float; 2nd-order int. Sequential decode. |
-| Dictionary | `Dict`, `Rle` | low-cardinality / run-heavy. |
+| Dictionary | `Dict`, `DictShared`, `Rle` | low-cardinality / run-heavy; `DictShared` codes into the **column-wide shared table** (see below). |
 | Generic | `ByteTranspose`, `Lz` | AoS→SoA byte planes; LZ77 over the block. |
 | Numeric backend | `Pco` | vendored pcodec — latent decomposition + bin-packing + ANS. |
+
+### The shared value dictionary
+
+Per-block `Dict` pays for its value table in every block — on columns whose
+distinct values recur *across* blocks (repeated coordinates, IDs, quantized
+readings) that either loses the competition or re-stores the same values per
+block. `DictShared` lifts the table to a **column preamble**: `build_shared`
+(one hash pass, bails above 50% cardinality or 2²⁰ distinct) stores the sorted
+distinct values once, compressed by the same raw/delta/transpose choice as
+`Dict`'s local table; each `DictShared` frame then holds only the codes
+section. A **net-win gate** keeps the preamble only when the blocks that chose
+`DictShared` saved more (vs their runner-up) than the preamble costs —
+otherwise those blocks are re-encoded without it, so streams never pay for a
+dead table. Blocks stay independently decodable given the read-only table, so
+parallel decode is preserved. Measured: `poi_lat` (424 K values, ~100 K
+distinct) went 1.20× → **2.00×**, reclaiming the whole-column-scope win inside
+the normal block pipeline; columns that never pick it are byte-identical.
 
 `Decimal128/256` are handled by `decimal.rs` (limb split → each limb through the
 integer engine), not a `Mode`.
@@ -212,12 +234,14 @@ the pure-ratio (`λ = 0`, all codecs) policy.
 ## 10. Stream format
 
 ```
-stream  = header ++ frame*
-header  = magic ++ version ++ dtype ++ flags ++ n_values ++ predictor_log2 ++ [validity]
+stream  = header ++ [validity] ++ [shared-dict preamble] ++ frame*
+header  = magic ++ version ++ dtype ++ flags ++ n_values ++ predictor_log2
 frame   = mode:u8 ++ payload          (one per block)
 ```
 
-The header records the column `DType` and (if present) the validity bitmap. Each
+The header records the column `DType`; flags mark the optional validity bitmap
+and the optional shared-dictionary preamble (the column-wide value table for
+`DictShared` frames), each of which follows the header in that order. Each
 frame's payload layout is mode-specific. The format is **internal** (not stabilized
 across versions) — the decoder always matches the encoder in the same build.
 

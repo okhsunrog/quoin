@@ -96,6 +96,19 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
        q-max. ✅ **dict→entropy cascade** for ≤256-cardinality blocks (basel_temp
        2.13→3.22×). **Pending:** a wider-alphabet cascade for high-cardinality
        columns (`medicare1`, ~46 K distinct/block), and `ALP digits → entropy`.
+3b. [x] **Full-quantum blocks at ratio-first levels** — `Balanced`/`High`/`Max`
+       plan 1 MiB blocks outright instead of probe-and-grow (`plan_blocks`);
+       measured never-worse on the corpus, up to +13.7% at Max (`basel_temp`)
+       and +35% at Balanced where the low-entropy probe declined to grow.
+       (Whole-column-sized blocks were measured and rejected: arade4 −3.2%,
+       medicare1 decode 803→46 MB/s, encode collapse — see `git log`.)
+3c. [x] **Shared value dictionary** (`DICT_SHARED`, mode 55) — the column-wide
+       distinct-value table stored once in a stream preamble; blocks hold only
+       codes. Net-win-gated (streams never pay for a dead preamble), parallel
+       decode preserved. `poi_lat` 1.20× → **2.00×** (beats zstd -19's 1.75×,
+       previously quoin's one ratio loss on the corpus). A shared *LZ*
+       dictionary was prototyped and shelved: sampled dicts recover only ~40%
+       of the LZ window gap on `poi_lon` (1.21→1.27 of →1.38 whole-column).
 4. [ ] **PFOR patching** — move range-outliers to exceptions in FOR_BITPACK/ALP so
        one large value doesn't widen a whole sub-block.
 4. [x] **Typed column API** — generalize off `f64` to real typed columns + a type
