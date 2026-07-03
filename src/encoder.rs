@@ -1,7 +1,8 @@
 //! Block planning and the mode competition.
 //!
 //! Blocks are adaptively sized (256 KiB base, grown to 1 MiB for low-entropy
-//! data — see [`plan_blocks`]), matching `fc`'s quantum range. Cheap per-block
+//! data; the ratio-first levels use 1 MiB outright — see [`plan_blocks`]),
+//! matching `fc`'s quantum range. Cheap per-block
 //! features ([`probe_block_features`]) then gate which mode families are worth
 //! trying; each applicable mode encodes the block and the smallest output wins.
 //! Blocks are independent, so with the `parallel` feature they are encoded
@@ -149,15 +150,26 @@ const MAX_QUANTUM: usize = crate::format::MAX_BLOCK_VALUES;
 
 /// Plan block boundaries. With a fixed `block_size` (from [`Config::block_size`])
 /// every block is exactly that many values (the last may be shorter). Otherwise
-/// probe each base-quantum region and grow it to `MAX_QUANTUM` when it looks
-/// low-entropy (dictionary / constant / run-heavy), else keep it at `BASE_QUANTUM`.
-fn plan_blocks(vals: &[u64], block_size: Option<usize>) -> Vec<(usize, usize)> {
+/// the ratio-first levels ([`Level::full_blocks`]) use `MAX_QUANTUM` outright —
+/// the wider LZ/dict/entropy window never lost ratio on the corpus — while the
+/// fast levels probe each base-quantum region and grow it to `MAX_QUANTUM` only
+/// when it looks low-entropy (dictionary / constant / run-heavy), keeping small
+/// blocks for random access and parallelism on noisy data.
+fn plan_blocks(vals: &[u64], block_size: Option<usize>, level: Level) -> Vec<(usize, usize)> {
     let n = vals.len();
     let mut ranges = Vec::new();
     let mut start = 0;
     if let Some(bs) = block_size {
         while start < n {
             let end = (start + bs).min(n);
+            ranges.push((start, end));
+            start = end;
+        }
+        return ranges;
+    }
+    if level.full_blocks() {
+        while start < n {
+            let end = (start + MAX_QUANTUM).min(n);
             ranges.push((start, end));
             start = end;
         }
@@ -217,7 +229,7 @@ pub(crate) fn compress_lane(
 fn build_frames(vals: &[u64], predictor_log2: u8, dtype: DType, cfg: &Config) -> Vec<Vec<u8>> {
     use rayon::prelude::*;
     let (sel, level) = (cfg.selection, cfg.level);
-    let ranges = plan_blocks(vals, cfg.fixed_block_size());
+    let ranges = plan_blocks(vals, cfg.fixed_block_size(), level);
     let run = || {
         ranges
             .par_iter()
@@ -235,7 +247,7 @@ fn build_frames(vals: &[u64], predictor_log2: u8, dtype: DType, cfg: &Config) ->
 
 #[cfg(not(feature = "parallel"))]
 fn build_frames(vals: &[u64], predictor_log2: u8, dtype: DType, cfg: &Config) -> Vec<Vec<u8>> {
-    plan_blocks(vals, cfg.fixed_block_size())
+    plan_blocks(vals, cfg.fixed_block_size(), cfg.level)
         .iter()
         .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, cfg.selection, dtype, cfg.level))
         .collect()

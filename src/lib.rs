@@ -179,6 +179,23 @@ impl Level {
         matches!(self, Level::Balanced | Level::High | Level::Max)
     }
 
+    /// Whether adaptive block planning uses **full-size blocks** (the max
+    /// quantum) unconditionally, instead of the base quantum grown only for
+    /// low-entropy regions. Bigger blocks widen the LZ/dict window and give the
+    /// entropy models more data — measured on the ALP corpus at `Max`, full
+    /// blocks never lost ratio and won up to +13.7% (`basel_temp`) where the
+    /// low-entropy probe declined to grow. The cost is coarser random access
+    /// and parallelism granularity, which is exactly what the ratio-first
+    /// levels trade away; the fast levels keep small base blocks.
+    ///
+    /// `Balanced` is included: its contract is fast *decode*, and bigger blocks
+    /// help there too (fewer frames, better amortization — decode measured
+    /// mostly faster), while ratio gained up to +35% (`basel_temp`) against
+    /// worst-case −0.8% losses from coarser per-block adaptivity.
+    pub(crate) fn full_blocks(self) -> bool {
+        matches!(self, Level::Balanced | Level::High | Level::Max)
+    }
+
     /// pco search level (`0..=12`). Decode cost is level-independent — only trades
     /// encode time for ratio. (Measured: 8 vs 12 barely moves ratio on the corpus,
     /// so it is *not* a useful level-spreader; `Max` searches the top, the rest use
@@ -214,9 +231,10 @@ pub struct Config {
     /// cheaper random access (decode one block for a point lookup), finer
     /// parallelism and lower latency — ideal when quoin's block is aligned with a
     /// storage chunk/page. **Larger** blocks give dictionary/LZ a wider window and
-    /// the entropy models more data to adapt to, for a better ratio. The adaptive
-    /// default already grows low-entropy blocks, so leave this `None` unless you
-    /// need a specific granularity.
+    /// the entropy models more data to adapt to, for a better ratio. The default
+    /// already plans full-size blocks at `Balanced`+ and grows low-entropy blocks
+    /// at the fast levels, so leave this `None` unless you need a specific
+    /// granularity.
     pub block_size: Option<usize>,
 }
 
