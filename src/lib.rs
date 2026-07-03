@@ -477,6 +477,13 @@ pub fn compress_column(col: ColumnRef, validity: Option<&[u8]>, cfg: Config) -> 
 ///
 /// Unlike the original C library (which silently decodes unknown mode IDs to
 /// zeros), this returns [`Error::UnknownMode`] on any unrecognized block.
+///
+/// **Untrusted input:** decoding materializes the column the header declares.
+/// Corrupt streams fail with an [`Error`] before any allocation the input
+/// can't justify, but a tiny *valid* stream may legitimately declare a huge
+/// column (e.g. a run-length-coded all-null bitmap expands to `n` rows). When
+/// `src` comes from an untrusted source, check [`decompressed_len`] against
+/// your memory budget first.
 pub fn decompress_column(src: &[u8]) -> Result<DecodedColumn, Error> {
     // Decimal containers carry a distinct flag and are decoded out of line; the
     // width is the dtype byte in the (otherwise unread) header.
@@ -536,7 +543,9 @@ pub fn compress(src: &[f64], cfg: Config) -> Vec<u8> {
 /// Decompress an `f64` stream produced by [`compress`].
 ///
 /// Returns [`Error::DTypeMismatch`] if the stream holds a non-`f64` column; use
-/// [`decompress_column`] for the type-generic path.
+/// [`decompress_column`] for the type-generic path. For untrusted input, check
+/// [`decompressed_len`] against your memory budget first (see
+/// [`decompress_column`]'s note).
 pub fn decompress(src: &[u8]) -> Result<Vec<f64>, Error> {
     match decompress_column(src)?.values {
         Column::F64(v) => Ok(v),

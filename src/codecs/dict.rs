@@ -312,11 +312,13 @@ pub(crate) fn build_shared(
 }
 
 /// Decode the preamble body back to the value table. `n_total` bounds the
-/// cardinality (distinct ≤ valid values) against corrupt streams.
+/// cardinality (distinct ≤ valid values) against corrupt streams; the encoder
+/// never emits more than [`SHARED_MAX_CARD`], so that also hard-caps the
+/// table allocation regardless of the declared column size.
 pub(crate) fn decode_shared_preamble(blob: &[u8], n_total: usize) -> Result<Vec<u64>, Error> {
     let mut pos = 0usize;
     let card = varint::read_u64(blob, &mut pos)? as usize;
-    if card == 0 || card > n_total {
+    if card == 0 || card > n_total || card > SHARED_MAX_CARD {
         return Err(Error::CorruptPayload("shared dict cardinality"));
     }
     let val_tag = *blob.get(pos).ok_or(Error::Truncated)?;

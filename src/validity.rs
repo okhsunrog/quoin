@@ -70,28 +70,35 @@ pub(crate) fn encode(bitmap: &[u8], n: usize) -> Vec<u8> {
 }
 
 /// Inverse of [`encode`]: reconstruct the `ceil(n/8)`-byte bitmap.
+///
+/// The blob is **validated before the bitmap is allocated**, so a corrupt
+/// stream declaring a huge `n` with a garbage blob errors out without a giant
+/// allocation. (A *valid* RLE blob may still legitimately describe a huge
+/// all-null column — bounding that is the caller's job, see
+/// [`decompressed_len`](crate::decompressed_len).)
 pub(crate) fn decode(blob: &[u8], n: usize) -> Result<Vec<u8>, Error> {
     let raw_len = n.div_ceil(8);
-    let mut bitmap = Vec::new();
-    bitmap
-        .try_reserve_exact(raw_len)
-        .map_err(|_| Error::CorruptPayload("validity bitmap too large"))?;
-    bitmap.resize(raw_len, 0);
     let (&tag, rest) = blob.split_first().ok_or(Error::Truncated)?;
     match tag {
         TAG_RAW => {
             let src = rest.get(..raw_len).ok_or(Error::Truncated)?;
-            bitmap.copy_from_slice(src);
+            let mut bitmap = Vec::new();
+            bitmap
+                .try_reserve_exact(raw_len)
+                .map_err(|_| Error::CorruptPayload("validity bitmap too large"))?;
+            bitmap.extend_from_slice(src);
             // Clear unused trailing bits so the output is canonical.
             let rem = n & 7;
             if rem != 0 {
                 bitmap[raw_len - 1] &= (1u8 << rem) - 1;
             }
+            Ok(bitmap)
         }
         TAG_RLE => {
+            // Pass 1: the runs must cover exactly `n` bits — checked against
+            // the (input-bounded) blob before anything is allocated.
             let mut pos = 0usize;
             let mut i = 0usize;
-            let mut cur = 0u8;
             while i < n {
                 let run = usize::try_from(varint::read_u64(rest, &mut pos)?)
                     .map_err(|_| Error::CorruptPayload("validity run too large"))?;
@@ -101,21 +108,34 @@ pub(crate) fn decode(blob: &[u8], n: usize) -> Result<Vec<u8>, Error> {
                 if end > n {
                     return Err(Error::CorruptPayload("validity run overruns"));
                 }
-                if cur == 1 {
-                    for k in i..end {
-                        set_bit(&mut bitmap, k);
-                    }
-                }
                 i = end;
-                cur ^= 1;
             }
             if i != n {
                 return Err(Error::CorruptPayload("validity runs mismatch"));
             }
+            // Pass 2: allocate and replay the (now validated) runs.
+            let mut bitmap = Vec::new();
+            bitmap
+                .try_reserve_exact(raw_len)
+                .map_err(|_| Error::CorruptPayload("validity bitmap too large"))?;
+            bitmap.resize(raw_len, 0);
+            let mut pos = 0usize;
+            let mut i = 0usize;
+            let mut cur = 0u8;
+            while i < n {
+                let run = varint::read_u64(rest, &mut pos)? as usize;
+                if cur == 1 {
+                    for k in i..i + run {
+                        set_bit(&mut bitmap, k);
+                    }
+                }
+                i += run;
+                cur ^= 1;
+            }
+            Ok(bitmap)
         }
-        _ => return Err(Error::CorruptPayload("validity tag")),
+        _ => Err(Error::CorruptPayload("validity tag")),
     }
-    Ok(bitmap)
 }
 
 /// Keep only the lane words at valid positions (compaction for the value codec).
