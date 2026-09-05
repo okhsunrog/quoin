@@ -262,16 +262,31 @@ fn levels_trade_ratio_for_speed_and_roundtrip() {
         "Fastest ({fastest}) should trade ratio vs Max ({max_size})"
     );
     // Fastest runs a strictly smaller codec pool than Fast (no XORZ/ALP/ALP-RD/
-    // dict/RLE), so on this float column it must not out-compress Fast — and the
-    // two must no longer be identical (the bug this guards against).
+    // dict/RLE), so on this float column it must not out-compress Fast.
     let fast = sizes[1].1;
     assert!(
         fastest >= fast,
         "Fastest ({fastest}) ≥ Fast ({fast}) in pool"
     );
+    // And the two must not run the identical competition (the bug this guards
+    // against): on a decimal column Fast's ALP/FLOAT_MULT win where Fastest's
+    // bit-packers cannot follow. (The smooth sine above no longer separates
+    // them: patched delta-bitpack wins at both.)
+    let cents: Vec<f64> = (0..100_000).map(|i| ((i * 7) % 100_000) as f64 / 100.0).collect();
+    let size_at = |level| {
+        quoin::compress(
+            &cents,
+            Config {
+                level,
+                ..Config::default()
+            },
+        )
+        .len()
+    };
+    let (fastest_c, fast_c) = (size_at(Level::Fastest), size_at(Level::Fast));
     assert!(
-        fastest > fast,
-        "Fastest and Fast must differ (distinct levels)"
+        fastest_c > fast_c,
+        "Fastest ({fastest_c}) and Fast ({fast_c}) must differ on decimals"
     );
 }
 
