@@ -26,7 +26,7 @@
 //! table, so parallel decode is preserved.
 
 use crate::codecs::{delta_bitpack, for_bitpack, transpose};
-use crate::entropy::{code_residuals, decode_residuals};
+use crate::entropy::{code_residuals, code_residuals_planes, decode_residuals};
 use crate::error::Error;
 use crate::lane::Lane;
 use crate::varint;
@@ -87,7 +87,7 @@ pub(crate) fn encode_values<L: Lane>(
         blob = delta;
     }
     if entropy {
-        let tr = code_residuals(&transpose::encode(sorted), lambda, allow_lz);
+        let tr = code_residuals_planes(&transpose::encode(sorted), L::BYTES, lambda, allow_lz);
         if tr.len() < blob.len() {
             tag = VAL_TRANSPOSE;
             blob = tr;

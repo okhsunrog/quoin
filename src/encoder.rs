@@ -15,7 +15,7 @@ use crate::codecs::{
     rle, stride, transpose, xorz,
 };
 use crate::dtype::{DType, Family};
-use crate::entropy::{code_residuals, estimate_order1_bytes};
+use crate::entropy::{code_residuals, code_residuals_planes, estimate_order1_bytes};
 use crate::format::{FRAME_HEADER_LEN, Header, MAX_BLOCK_BYTES};
 use crate::lane::Lane;
 use crate::mode::Mode;
@@ -385,6 +385,21 @@ fn coded_if_competitive(
     Some(code_residuals(res, lambda, allow_lz))
 }
 
+/// [`coded_if_competitive`] for a byte-transposed residual of `planes` planes
+/// (one entropy model per plane is also tried; see `code_residuals_planes`).
+fn coded_planes_if_competitive(
+    res: &[u8],
+    planes: usize,
+    lambda: u64,
+    allow_lz: bool,
+    best_score: usize,
+) -> Option<Vec<u8>> {
+    if lambda == 0 && estimate_order1_bytes(res).saturating_mul(9) / 10 >= best_score {
+        return None;
+    }
+    Some(code_residuals_planes(res, planes, lambda, allow_lz))
+}
+
 fn encode_block_full<L: Lane>(
     block: &[L],
     predictor_log2: u8,
@@ -551,7 +566,7 @@ fn encode_block_full<L: Lane>(
         && block_compressible
         && (feats.exp_range <= TRANSPOSE_EXP_LIMIT || feats.looks_like_repeats)
         && let Some(p) =
-            coded_if_competitive(&transpose::encode(block), lambda, allow_lz, best.score)
+            coded_planes_if_competitive(&transpose::encode(block), L::BYTES, lambda, allow_lz, best.score)
     {
         best.consider(Mode::ByteTranspose, p);
     }
@@ -738,7 +753,12 @@ fn encode_mode<L: Lane>(
         )),
         Mode::FloatMult => float_mult::encode(block, entropy, lambda, allow_lz),
         Mode::Lz => Some(code_residuals(&lz::encode(block), lambda, allow_lz)),
-        Mode::ByteTranspose => Some(code_residuals(&transpose::encode(block), lambda, allow_lz)),
+        Mode::ByteTranspose => Some(code_residuals_planes(
+            &transpose::encode(block),
+            L::BYTES,
+            lambda,
+            allow_lz,
+        )),
         Mode::ForBitpack => Some(for_bitpack::encode(block, dtype.signed())),
         Mode::Alp => alp::encode(block),
         Mode::AlpRd => alp_rd::encode(block, entropy, lambda, allow_lz),
