@@ -27,6 +27,12 @@ const FM_BITPACK: u8 = 0;
 /// Payload tag: the `k` values are zig-zag delta + residual-coded.
 const FM_ENTROPY: u8 = 1;
 
+/// Whether this payload decodes through the entropy coder (vs. random-access
+/// bit-packing) — the selection's decode-cost class depends on it.
+pub(crate) fn uses_entropy(payload: &[u8]) -> bool {
+    payload.first() == Some(&FM_ENTROPY)
+}
+
 #[inline]
 fn zigzag(n: i64) -> u64 {
     ((n << 1) ^ (n >> 63)) as u64

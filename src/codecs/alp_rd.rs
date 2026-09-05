@@ -117,6 +117,32 @@ fn choose_cut<L: Lane>(vals: &[L]) -> Option<u32> {
     }
 }
 
+/// Whether an ALP-RD payload decodes either stream through the entropy coder
+/// — the selection's decode-cost class depends on it.
+pub(crate) fn uses_entropy<L: Lane>(payload: &[u8]) -> bool {
+    let mut pos = 2usize; // left_bw, dict_size
+    let Some(&dict_size) = payload.get(1) else {
+        return true;
+    };
+    pos += usize::from(dict_size) * L::BYTES;
+    let Ok(n_exc) = varint::read_u64(payload, &mut pos) else {
+        return true;
+    };
+    for _ in 0..n_exc {
+        if varint::read_u64(payload, &mut pos).is_err() {
+            return true;
+        }
+        pos += L::BYTES;
+    }
+    let codes_tag = payload.get(pos).copied();
+    pos += 1;
+    let Ok(codes_len) = varint::read_u64(payload, &mut pos) else {
+        return true;
+    };
+    let rights_tag = payload.get(pos + codes_len as usize).copied();
+    codes_tag != Some(T_BITPACK) || rights_tag != Some(T_BITPACK)
+}
+
 /// Diagnostic (cascade-lab): the raw `(codes, rights)` integer streams for a
 /// block, before they're bit-packed — so the lab can measure whether entropy-
 /// coding them beats the current raw `for_bitpack`. Mirrors `encode`'s split.

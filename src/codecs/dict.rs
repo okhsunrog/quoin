@@ -42,6 +42,29 @@ const VAL_RAW: u8 = 0;
 const VAL_DELTA: u8 = 1;
 const VAL_TRANSPOSE: u8 = 2;
 
+/// Whether a `Dict` payload decodes through the entropy coder (either the
+/// value table or the codes) — the selection's decode-cost class depends on it.
+pub(crate) fn uses_entropy(payload: &[u8]) -> bool {
+    let mut pos = 0usize;
+    let Ok(_card) = varint::read_u64(payload, &mut pos) else {
+        return true;
+    };
+    let Some(&val_tag) = payload.get(pos) else {
+        return true;
+    };
+    pos += 1;
+    let Ok(val_len) = varint::read_u64(payload, &mut pos) else {
+        return true;
+    };
+    let codes_tag = payload.get(pos + val_len as usize).copied();
+    val_tag == VAL_TRANSPOSE || codes_tag != Some(CODES_BITPACK)
+}
+
+/// Whether a `DictShared` payload (a bare codes section) is entropy-coded.
+pub(crate) fn shared_uses_entropy(payload: &[u8]) -> bool {
+    payload.first() != Some(&CODES_BITPACK)
+}
+
 /// Number of byte-planes needed to represent codes `0..card`.
 fn plane_count(card: usize) -> usize {
     if card <= 256 { 1 } else { 2 }
