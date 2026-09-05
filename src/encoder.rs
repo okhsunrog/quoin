@@ -623,8 +623,16 @@ const SAMPLE_MODES: [Mode; 15] = [
     Mode::Rle,
 ];
 
-const SAMPLE_RUNS: usize = 8;
+/// 16 runs × 64 = 1024 values: exactly one FastLanes sub-block, so the
+/// bit-packed modes (FoR, delta, ALP, dict codes) are estimated without the
+/// 1024-padding that a 512-value sample charged them (≈2× pessimistic), and
+/// all modes are compared on the same footing.
+const SAMPLE_RUNS: usize = 16;
 const SAMPLE_RUN_LEN: usize = 64;
+/// A runner-up whose sample estimate is within this fraction of the winner's
+/// is also encoded in full: sample estimates are noisy at the margin, and a
+/// second full encode is cheap next to the full block's own work.
+const SAMPLE_RUNNER_UP_MARGIN_PCT: usize = 10;
 /// Small predictor table for sample estimates — the sample is tiny, so a 1 MiB
 /// table would dominate the cost. The sample is never decoded, so the table
 /// size needn't match the full encode.
@@ -762,26 +770,32 @@ fn encode_block_sampled<L: Lane>(
         consider_full(Mode::Pco, &mut best);
     }
 
-    // Rank the remaining modes by their estimate on a small sample, then encode
-    // only the winner in full and let it challenge the structural best.
+    // Rank the remaining modes by their estimate on a small sample — scored
+    // exactly like the final choice (`size + λ·decode_cost`, on the sample's
+    // bytes), so a faster level's preference for cheap decoders applies here
+    // too — then encode the winner in full, plus the runner-up when its
+    // estimate is close, and let them challenge the structural best.
     let sample = build_sample(block);
-    let mut win = None;
-    let mut win_est = usize::MAX;
-    for &m in SAMPLE_MODES
+    let sample_bytes = sample.len() * L::BYTES;
+    let mut ranked: Vec<(usize, Mode)> = SAMPLE_MODES
         .iter()
         .filter(|&&m| mode_runs(m, family, level))
-    {
-        if let Some(p) = encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None)
-            && p.len() < win_est
-        {
-            win_est = p.len();
-            win = Some(m);
+        .filter_map(|&m| {
+            encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None)
+                .map(|p| (p.len() + penalty(m, level.lambda(), sample_bytes), m))
+        })
+        .collect();
+    ranked.sort_unstable_by_key(|&(score, m)| (score, m as u8));
+    if let Some(&(win_score, win)) = ranked.first() {
+        if let Some(p) = encode_mode(win, block, predictor_log2, dtype, level, None) {
+            best.consider(win, p);
         }
-    }
-    if let Some(m) = win
-        && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, None)
-    {
-        best.consider(m, p);
+        if let Some(&(second_score, second)) = ranked.get(1)
+            && second_score.saturating_sub(win_score) * 100 <= win_score * SAMPLE_RUNNER_UP_MARGIN_PCT
+            && let Some(p) = encode_mode(second, block, predictor_log2, dtype, level, None)
+        {
+            best.consider(second, p);
+        }
     }
 
     crate::diag::record_win(best.mode.id());

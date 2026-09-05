@@ -4,7 +4,8 @@
 //! (default `datasets/alp`, capped at `LAB_N` values, default 1 Mi), plus a
 //! few synthetic integer columns and, when `LAB_BOOX` names PointDocument
 //! files, their `x`/`y` (f32) and `pressure`/`time` (i32) columns, at the
-//! levels in `LAB_LEVELS` (default `fast,balanced,max`). Emits CSV:
+//! levels in `LAB_LEVELS` (default `fast,balanced,max`), with `LAB_SELECTION=sample`
+//! for the sampled selector. Emits CSV:
 //! `column,dtype,level,n,raw_bytes,bytes,enc_ms,dec_ms,modes`. Every decode is
 //! checked bit-exact. Meant for A/B: run once on the baseline commit, once on
 //! the change, diff the CSVs.
@@ -165,10 +166,14 @@ fn main() {
         }
     }
 
+    let selection = match std::env::var("LAB_SELECTION").as_deref() {
+        Ok("sample") => quoin::Selection::Sample,
+        _ => quoin::Selection::Full,
+    };
     println!("column,dtype,level,n,raw_bytes,bytes,enc_ms,dec_ms,modes");
     for (name, col) in &cols {
         for (lname, level) in &levels {
-            let cfg = Config { level: *level, ..Config::default() };
+            let cfg = Config { level: *level, selection, ..Config::default() };
             quoin::reset_mode_win_counts();
             let t0 = Instant::now();
             let enc = black_box(col.encode(cfg));
