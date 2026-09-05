@@ -1,5 +1,5 @@
 //! ALP — Adaptive Lossless floating-Point (the main scheme), ported from the
-//! CWI reference (SIGMOD'24). For decimal-like doubles it represents each value
+//! CWI reference (SIGMOD'24). For decimal-like floats it represents each value
 //! as a scaled integer `digit = round(v · 10^e · 10^-f)` and stores the digits
 //! via frame-of-reference + FastLanes bit-packing. Values that don't round-trip
 //! (and NaN/inf) are stored verbatim as **exceptions**, so a few outliers don't
@@ -7,64 +7,57 @@
 //!
 //! Decoding is exact: encode verifies `decode(encode(v)) == v` bit-for-bit per
 //! value (else it's an exception), and the decoder recomputes the same product.
+//! The arithmetic runs in the lane's float (`f32` on a 32-bit lane, with the
+//! reference's float constants: exponents to 10, magic `1.5·2^23`), so an `f32`
+//! column is encoded as the `f32` decimal it is — not as a widened double.
 //!
-//! Non-decimal real doubles are handled by [`super::alp_rd`], the ALP-RD
+//! Non-decimal reals are handled by [`super::alp_rd`], the ALP-RD
 //! split-dictionary scheme.
+//!
+//! Payload: `varint(n)` then per 1024-value sub-block
+//! `e:u8 ++ f:u8 ++ n_exc:u16 ++ min:lane ++ width:u8 ++ packed ++ (pos:u16 ++ bits:lane)*`.
 
 use crate::bitpack::{self, BLOCK};
 use crate::error::Error;
+use crate::lane::{Lane, LaneFloat};
 use crate::varint;
 
-const MAX_EXP: usize = 18;
-/// 1.5 · 2^52 — the round-to-nearest-int magic constant (ALP `MAGIC_NUMBER`).
-const MAGIC: f64 = 6_755_399_441_055_744.0;
-const UPPER: f64 = 9.223_372_036_854_776e18; // ~2^63, ALP's encoding limit
-
-static EXP10: [f64; MAX_EXP + 1] = [
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18,
-];
-static FRAC10: [f64; MAX_EXP + 1] = [
-    1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14,
-    1e-15, 1e-16, 1e-17, 1e-18,
-];
-
 #[inline]
-fn encode_value(v: f64, e: usize, f: usize) -> Option<i64> {
-    let tmp = v * EXP10[e] * FRAC10[f];
-    if !tmp.is_finite() || tmp >= UPPER || tmp <= -UPPER {
+fn encode_value<F: LaneFloat>(v: F, e: usize, f: usize) -> Option<i64> {
+    let tmp = v * F::exp10(e) * F::frac10(f);
+    if !tmp.is_finite() || tmp >= F::ALP_UPPER || tmp <= -F::ALP_UPPER {
         return None;
     }
-    Some((tmp + MAGIC - MAGIC) as i64)
+    Some((tmp + F::ALP_MAGIC - F::ALP_MAGIC).to_i64())
 }
 
 #[inline]
-fn decode_value(digit: i64, e: usize, f: usize) -> f64 {
-    (digit as f64) * EXP10[f] * FRAC10[e]
+fn decode_value<F: LaneFloat>(digit: i64, e: usize, f: usize) -> F {
+    F::from_i64(digit) * F::exp10(f) * F::frac10(e)
 }
 
 /// Pick `(e, f)` minimizing estimated size on a 32-value sample of the sub-block.
 /// Returns `None` when even the best fit leaves > half the sample as exceptions
 /// (non-decimal data) — lets the mode bail cheaply before a full encode.
-fn find_ef(sub: &[u64]) -> Option<(usize, usize)> {
+fn find_ef<L: Lane>(sub: &[L]) -> Option<(usize, usize)> {
     let n = sub.len();
     let stride = (n / 32).max(1);
-    let sample: Vec<f64> = (0..n)
+    let sample: Vec<L::Float> = (0..n)
         .step_by(stride)
         .take(32)
-        .map(|i| f64::from_bits(sub[i]))
+        .map(|i| sub[i].to_float())
         .collect();
 
     let mut best = (0usize, 0usize);
     let mut best_cost = usize::MAX;
     let mut best_exc = sample.len();
-    for e in 0..=MAX_EXP {
+    for e in 0..=L::Float::ALP_MAX_EXP {
         for f in 0..=e {
             let mut exc = 0usize;
             let (mut lo, mut hi) = (i64::MAX, i64::MIN);
             for &v in &sample {
                 match encode_value(v, e, f) {
-                    Some(d) if decode_value(d, e, f).to_bits() == v.to_bits() => {
+                    Some(d) if decode_value::<L::Float>(d, e, f).to_bits() == v.to_bits() => {
                         lo = lo.min(d);
                         hi = hi.max(d);
                     }
@@ -72,11 +65,15 @@ fn find_ef(sub: &[u64]) -> Option<(usize, usize)> {
                 }
             }
             let width = if exc == sample.len() || hi <= lo {
-                if exc == sample.len() { 64 } else { 0 }
+                if exc == sample.len() {
+                    L::BITS as usize
+                } else {
+                    0
+                }
             } else {
                 (64 - (hi.wrapping_sub(lo) as u64).leading_zeros()) as usize
             };
-            let cost = width * sample.len() + exc * 80; // ~exception bytes in bits
+            let cost = width * sample.len() + exc * (16 + L::BITS as usize); // exception bits
             if cost < best_cost {
                 best_cost = cost;
                 best = (e, f);
@@ -90,7 +87,7 @@ fn find_ef(sub: &[u64]) -> Option<(usize, usize)> {
     Some(best)
 }
 
-pub(crate) fn encode(vals: &[u64]) -> Option<Vec<u8>> {
+pub(crate) fn encode<L: Lane>(vals: &[L]) -> Option<Vec<u8>> {
     if vals.is_empty() {
         return None;
     }
@@ -105,16 +102,16 @@ pub(crate) fn encode(vals: &[u64]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn encode_subblock(sub: &[u64], out: &mut Vec<u8>) -> Option<()> {
+fn encode_subblock<L: Lane>(sub: &[L], out: &mut Vec<u8>) -> Option<()> {
     let (e, f) = find_ef(sub)?;
 
     let mut digits = [0i64; BLOCK];
-    let mut exceptions: Vec<(u16, u64)> = Vec::new();
+    let mut exceptions: Vec<(u16, L)> = Vec::new();
     let mut first_valid: Option<i64> = None;
     for (k, &bits) in sub.iter().enumerate() {
-        let v = f64::from_bits(bits);
+        let v = bits.to_float();
         match encode_value(v, e, f) {
-            Some(d) if decode_value(d, e, f).to_bits() == bits => {
+            Some(d) if decode_value::<L::Float>(d, e, f).to_bits() == bits => {
                 digits[k] = d;
                 first_valid.get_or_insert(d);
             }
@@ -145,7 +142,9 @@ fn encode_subblock(sub: &[u64], out: &mut Vec<u8>) -> Option<()> {
     out.push(e as u8);
     out.push(f as u8);
     out.extend_from_slice(&(exceptions.len() as u16).to_le_bytes());
-    out.extend_from_slice(&min.to_le_bytes());
+    // The digit range is bounded by `ALP_UPPER`, which fits the lane as a
+    // signed value (i32 on the 32-bit lane).
+    L::from_signed(min).write_le(out);
     out.push(width as u8);
     if width > 0 {
         let mut residuals = [0u32; BLOCK];
@@ -160,40 +159,30 @@ fn encode_subblock(sub: &[u64], out: &mut Vec<u8>) -> Option<()> {
     }
     for &(pos, bits) in &exceptions {
         out.extend_from_slice(&pos.to_le_bytes());
-        out.extend_from_slice(&bits.to_le_bytes());
+        bits.write_le(out);
     }
     Some(())
 }
 
-pub(crate) fn decode(payload: &[u8], n_values: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn decode<L: Lane>(payload: &[u8], n_values: usize) -> Result<Vec<L>, Error> {
     let mut pos = 0usize;
     let n = varint::read_u64(payload, &mut pos)? as usize;
     if n != n_values {
         return Err(Error::CorruptPayload("alp length mismatch"));
     }
+    let head_len = 5 + L::BYTES;
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
-        let e = *payload.get(pos).ok_or(Error::Truncated)? as usize;
-        let f = *payload.get(pos + 1).ok_or(Error::Truncated)? as usize;
-        if e > MAX_EXP || f > e {
+        let head = payload.get(pos..pos + head_len).ok_or(Error::Truncated)?;
+        let e = head[0] as usize;
+        let f = head[1] as usize;
+        if e > L::Float::ALP_MAX_EXP || f > e {
             return Err(Error::CorruptPayload("alp exponent/factor"));
         }
-        let exc_count = u16::from_le_bytes(
-            payload
-                .get(pos + 2..pos + 4)
-                .ok_or(Error::Truncated)?
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let min = i64::from_le_bytes(
-            payload
-                .get(pos + 4..pos + 12)
-                .ok_or(Error::Truncated)?
-                .try_into()
-                .unwrap(),
-        );
-        let width = *payload.get(pos + 12).ok_or(Error::Truncated)?;
-        pos += 13;
+        let exc_count = u16::from_le_bytes(head[2..4].try_into().unwrap()) as usize;
+        let min = L::read_le(&head[4..4 + L::BYTES]).as_signed();
+        let width = head[4 + L::BYTES];
+        pos += head_len;
         if width > 32 {
             return Err(Error::CorruptPayload("alp width"));
         }
@@ -219,25 +208,15 @@ pub(crate) fn decode(payload: &[u8], n_values: usize) -> Result<Vec<u64>, Error>
 
         let start = out.len();
         for &d in digits.iter().take(count) {
-            out.push(decode_value(d, e, f).to_bits());
+            out.push(decode_value::<L::Float>(d, e, f).to_bits());
         }
         // Patch exceptions over the decoded digits.
+        let exc_len = 2 + L::BYTES;
         for _ in 0..exc_count {
-            let p = u16::from_le_bytes(
-                payload
-                    .get(pos..pos + 2)
-                    .ok_or(Error::Truncated)?
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            let bits = u64::from_le_bytes(
-                payload
-                    .get(pos + 2..pos + 10)
-                    .ok_or(Error::Truncated)?
-                    .try_into()
-                    .unwrap(),
-            );
-            pos += 10;
+            let ex = payload.get(pos..pos + exc_len).ok_or(Error::Truncated)?;
+            let p = u16::from_le_bytes(ex[..2].try_into().unwrap()) as usize;
+            let bits = L::read_le(&ex[2..]);
+            pos += exc_len;
             if p >= count {
                 return Err(Error::CorruptPayload("alp exception position"));
             }
@@ -251,11 +230,11 @@ pub(crate) fn decode(payload: &[u8], n_values: usize) -> Result<Vec<u64>, Error>
 mod tests {
     use super::*;
 
-    fn roundtrip(vals: &[u64]) {
-        if let Some(enc) = encode(vals) {
-            let dec = decode(&enc, vals.len()).unwrap();
-            assert_eq!(dec, vals);
-        }
+    fn roundtrip<L: Lane>(vals: &[L]) -> Option<usize> {
+        let enc = encode(vals)?;
+        let dec = decode::<L>(&enc, vals.len()).unwrap();
+        assert_eq!(dec, vals);
+        Some(enc.len())
     }
 
     #[test]
@@ -274,8 +253,48 @@ mod tests {
                 .map(|i| ((i % 100) as f64 * 0.25).to_bits())
                 .collect::<Vec<_>>(),
         );
-        roundtrip(&[]);
+        roundtrip::<u64>(&[]);
         roundtrip(&[1.25_f64.to_bits()]);
         roundtrip(&vec![0.0f64.to_bits(); 2000]);
+    }
+
+    #[test]
+    fn f32_decimals_encode_natively() {
+        // f32 prices in cents: decimal in f32 arithmetic, 4-byte exceptions.
+        let mut v: Vec<u32> = (0..5000)
+            .map(|i| (100.0_f32 + (i % 700) as f32 / 100.0).to_bits())
+            .collect();
+        v[10] = f32::NAN.to_bits();
+        v[11] = 0x7F80_0001; // signaling NaN: exception, exact
+        v[12] = (-0.0f32).to_bits(); // ±0 differ in bits → exception, exact
+        v[2000] = 3e38f32.to_bits();
+        v[4999] = f32::INFINITY.to_bits();
+        let size = roundtrip(&v).expect("f32 decimals should ALP-encode");
+        assert!(
+            size < v.len() * 2,
+            "cent prices pack under 2 B/value: {size}"
+        );
+
+        // Stylus-like coordinates with one fractional decimal digit.
+        let xy: Vec<u32> = (0..4096)
+            .map(|i| ((i as f32) * 0.3 + 1234.5).to_bits())
+            .collect();
+        let size = roundtrip(&xy).expect("one-decimal f32 should ALP-encode");
+        assert!(size < xy.len() * 4);
+        roundtrip::<u32>(&[]);
+        roundtrip(&[1.25_f32.to_bits()]);
+        roundtrip(&vec![0.0f32.to_bits(); 2000]);
+    }
+
+    #[test]
+    fn non_decimal_bails() {
+        let mut s = 1u64;
+        let noise: Vec<u32> = (0..2048)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (f32::from_bits((s >> 40) as u32 & 0x3FFF_FFFF)).to_bits()
+            })
+            .collect();
+        assert!(encode(&noise).is_none());
     }
 }

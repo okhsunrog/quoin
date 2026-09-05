@@ -136,3 +136,88 @@ fn adversarial_roundtrip() {
         assert_eq!(a, b);
     }
 }
+
+/// The 32-bit lane has its own payload layouts (4-byte constants/minima/dict
+/// entries, 4 byte-planes, i32 FoR); mutate valid f32/i32 streams too.
+fn seeds32() -> Vec<Vec<u8>> {
+    use quoin::{ColumnRef, Level, compress_column};
+    let mut s = 5u64;
+    let f: Vec<Vec<f32>> = vec![
+        (0..4000).map(|i| i as f32 * 0.5).collect(),
+        (0..4000).map(|i| (i as f32 * 0.01).sin()).collect(),
+        (0..4000).map(|i| (i & 15) as f32).collect(),
+        (0..4000)
+            .map(|_| f32::from_bits((lcg(&mut s) >> 32) as u32))
+            .collect(),
+        (0..4000)
+            .map(|i| 100.0 + (i % 700) as f32 / 100.0)
+            .collect(),
+        vec![42.0; 4000],
+    ];
+    let i: Vec<Vec<i32>> = vec![
+        (0..4000).map(|i| (i % 300) - 150).collect(),
+        (0..4000).map(|i| i * 2).collect(),
+    ];
+    let mut out = Vec::new();
+    for level in [Level::Fast, Level::Balanced, Level::Max] {
+        let cfg = Config {
+            level,
+            ..Config::default()
+        };
+        for d in &f {
+            out.push(compress_column(ColumnRef::F32(d), None, cfg));
+        }
+        for d in &i {
+            out.push(compress_column(ColumnRef::I32(d), None, cfg));
+        }
+    }
+    out
+}
+
+#[test]
+fn mutated_narrow_lane_streams_never_panic() {
+    let seeds = seeds32();
+    let mut s = 0x2468_ace0u64;
+    for _ in 0..40_000 {
+        let mut buf = seeds[(lcg(&mut s) as usize) % seeds.len()].clone();
+        for _ in 0..(1 + lcg(&mut s) % 4) {
+            if buf.is_empty() {
+                break;
+            }
+            match lcg(&mut s) % 3 {
+                0 => {
+                    let i = (lcg(&mut s) as usize) % buf.len();
+                    buf[i] = (lcg(&mut s) >> 20) as u8;
+                }
+                1 => {
+                    let i = (lcg(&mut s) as usize) % buf.len();
+                    buf[i] ^= 1 << (lcg(&mut s) % 8);
+                }
+                _ => {
+                    let keep = (lcg(&mut s) as usize) % buf.len();
+                    buf.truncate(keep);
+                }
+            }
+        }
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            let _ = quoin::decompress_column(&buf);
+        }));
+        assert!(
+            r.is_ok(),
+            "decompress_column panicked on narrow-lane input {buf:?}"
+        );
+    }
+}
+
+#[test]
+fn narrow_lane_truncations_error_cleanly() {
+    use quoin::{ColumnRef, compress_column};
+    let vals: Vec<f32> = (0..3000).map(|i| (i % 50) as f32 * 0.25).collect();
+    let packed = compress_column(ColumnRef::F32(&vals), None, Config::default());
+    for end in 0..packed.len() {
+        assert!(
+            quoin::decompress_column(&packed[..end]).is_err(),
+            "prefix {end}"
+        );
+    }
+}

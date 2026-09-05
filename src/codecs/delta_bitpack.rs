@@ -6,7 +6,7 @@
 //! Wins on monotonic / regularly-stepped integer columns (timestamps, ids):
 //! the deltas are small and clustered, so FoR+bitpack squeezes them to a few
 //! bits. (Float bit patterns aren't delta-friendly across exponent bands, so it
-//! rarely wins on `f64` — like the other integer codecs.)
+//! rarely wins on floats — like the other integer codecs.)
 //!
 //! Decode is a scalar prefix sum. A lane-parallel (FastLanes) prefix sum was
 //! tried and reverted: as a *separate* layer over [`super::for_bitpack`] it
@@ -15,29 +15,23 @@
 //! real speedup needs the prefix sum *fused into* the bit-unpack kernel
 //! (FastLanes' `undelta_pack`), which is a `for_bitpack` rewrite, not done here;
 //! and delta decode (~1.5 GB/s) isn't the dominant bottleneck anyway.
+//!
+//! Payload: `base:lane ++ for_bitpack(zigzag deltas)`.
 
 use crate::codecs::for_bitpack;
 use crate::error::Error;
+use crate::lane::Lane;
 
-#[inline]
-fn zigzag(n: u64) -> u64 {
-    (n << 1) ^ ((n as i64 >> 63) as u64)
-}
-
-#[inline]
-fn unzigzag(z: u64) -> u64 {
-    (z >> 1) ^ 0u64.wrapping_sub(z & 1)
-}
-
-pub(crate) fn encode(vals: &[u64]) -> Vec<u8> {
+pub(crate) fn encode<L: Lane>(vals: &[L]) -> Vec<u8> {
     // Store the first value as the base so delta[0] = 0 — otherwise the absolute
     // first value (potentially huge) would blow the first sub-block's bit width.
-    let base = vals.first().copied().unwrap_or(0);
-    let mut out = base.to_le_bytes().to_vec();
+    let base = vals.first().copied().unwrap_or(L::ZERO);
+    let mut out = Vec::with_capacity(L::BYTES + vals.len() * 2);
+    base.write_le(&mut out);
     let mut deltas = Vec::with_capacity(vals.len());
     let mut prev = base;
     for &v in vals {
-        deltas.push(zigzag(v.wrapping_sub(prev)));
+        deltas.push(v.wrapping_sub(prev).zigzag());
         prev = v;
     }
     // Deltas are already zigzagged (unsigned magnitude), so FoR is unsigned.
@@ -45,19 +39,13 @@ pub(crate) fn encode(vals: &[u64]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
-    let base = u64::from_le_bytes(
-        payload
-            .get(0..8)
-            .ok_or(Error::Truncated)?
-            .try_into()
-            .unwrap(),
-    );
-    let deltas = for_bitpack::decode(&payload[8..], n, false)?;
+pub(crate) fn decode<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
+    let base = L::read_le(payload.get(0..L::BYTES).ok_or(Error::Truncated)?);
+    let deltas = for_bitpack::decode::<L>(&payload[L::BYTES..], n, false)?;
     let mut out = Vec::with_capacity(n);
     let mut prev = base;
     for z in deltas {
-        prev = prev.wrapping_add(unzigzag(z));
+        prev = prev.wrapping_add(z.unzigzag());
         out.push(prev);
     }
     Ok(out)
@@ -84,10 +72,33 @@ mod tests {
             enc.len() < vals.len() * 8 / 4,
             "monotonic ids should pack small"
         );
-        assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
+        assert_eq!(decode::<u64>(&enc, vals.len()).unwrap(), vals);
 
-        assert_eq!(decode(&encode(&[]), 0).unwrap(), Vec::<u64>::new());
+        assert_eq!(
+            decode::<u64>(&encode::<u64>(&[]), 0).unwrap(),
+            Vec::<u64>::new()
+        );
         let one = [12345u64];
-        assert_eq!(decode(&encode(&one), 1).unwrap(), one);
+        assert_eq!(decode::<u64>(&encode(&one), 1).unwrap(), one);
+    }
+
+    #[test]
+    fn lane32_roundtrip() {
+        // Relative-time-like i32 column with a negative excursion and a wrap.
+        let vals: Vec<u32> = (0..5000i32)
+            .map(|i| (i * 2 - 300 + (i % 7)) as u32)
+            .chain([u32::MAX, 0, 5])
+            .collect();
+        let enc = encode(&vals);
+        assert!(
+            enc.len() < vals.len(),
+            "smooth i32 deltas pack under 1 B/value"
+        );
+        assert_eq!(decode::<u32>(&enc, vals.len()).unwrap(), vals);
+        assert_eq!(
+            decode::<u32>(&encode::<u32>(&[]), 0).unwrap(),
+            Vec::<u32>::new()
+        );
+        assert_eq!(decode::<u32>(&encode(&[7u32]), 1).unwrap(), [7]);
     }
 }

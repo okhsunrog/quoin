@@ -5,84 +5,110 @@
 //! them, and entropy-codes with interleaved ANS. It wins on smooth/structured
 //! numeric columns (sensor streams, slowly-varying series) that quoin's own
 //! transforms only partially capture, so it competes as a heavyweight block mode
-//! at `High`/`Max` (see [`Level::allows_pco`](crate::Level::allows_pco)).
+//! at `Balanced`+ (see [`Level::allows_pco`](crate::Level::allows_pco)).
 //!
-//! The block arrives as quoin's internal `u64` lane (see [`DType`]); we map each
-//! lane word to the concrete pco [`Number`](quoin_pco::data_types::Number) type —
-//! using the *same* convention as [`ColumnRef::to_lane`](crate::ColumnRef) —
-//! compress, and on decode widen back to the lane bit-for-bit. pco is lossless
-//! (exact for NaN / ±0 / subnormals), so the lane round-trips exactly.
+//! The block arrives as a lane slice; the [`DType`] names which pco
+//! [`Number`](quoin_pco::data_types::Number) type the lane *is* (`u32` lane →
+//! `f32`/`i32`/`u32`, `u64` lane → `f64`/`i64`/`u64`), and the slice is
+//! **reinterpreted in place** — no conversion, no copy, no widening. pco is
+//! lossless (exact for NaN / ±0 / subnormals), so the lane round-trips exactly.
 
 use quoin_pco::ChunkConfig;
+use quoin_pco::data_types::Number;
 use quoin_pco::standalone::{simple_compress, simple_decompress};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::dtype::DType;
 use crate::error::Error;
 
-/// Map a quoin `u64` lane to pco numbers of type `$t` (via `$to`), compress, and
-/// return the bytes. `$to` mirrors the narrowing in `ColumnRef::to_lane`.
-macro_rules! compress_as {
-    ($block:expr, $cfg:expr, $t:ty, $to:expr) => {{
-        let nums: Vec<$t> = $block.iter().map(|&v| $to(v)).collect();
-        simple_compress::<$t>(&nums, $cfg).ok()
-    }};
+const PCO_CORRUPT: Error = Error::CorruptPayload("pco decode");
+
+/// Compress a lane slice as pco numbers of type `T` (same width and alignment
+/// as `L`, so the reinterpretation is a no-op).
+fn compress_as<L, T>(block: &[L], clevel: usize) -> Option<Vec<u8>>
+where
+    L: IntoBytes + Immutable,
+    T: Number + FromBytes + Immutable,
+{
+    let nums = <[T]>::ref_from_bytes(block.as_bytes()).ok()?;
+    simple_compress::<T>(nums, &ChunkConfig::default().with_compression_level(clevel)).ok()
 }
 
-/// Compress `block` (quoin `u64` lane) with pco at compression level `clevel`.
-/// Returns `None` if pco errors or the block is empty (RAW covers those).
-pub(crate) fn encode(block: &[u64], dtype: DType, clevel: usize) -> Option<Vec<u8>> {
+/// Decompress pco numbers of type `T` and return them as lane words (a
+/// same-width reinterpretation of each value; `Vec::into_iter().map().collect()`
+/// runs in place for same-size elements).
+fn decompress_as<L, T>(payload: &[u8], n: usize, to_lane: fn(T) -> L) -> Result<Vec<L>, Error>
+where
+    T: Number,
+{
+    let nums: Vec<T> = simple_decompress::<T>(payload).map_err(|_| PCO_CORRUPT)?;
+    if nums.len() != n {
+        return Err(PCO_CORRUPT);
+    }
+    Ok(nums.into_iter().map(to_lane).collect())
+}
+
+/// Compress a 64-bit-lane block (`f64`/`i64`/`u64`) at compression level
+/// `clevel`. `None` if pco errors or the block is empty (RAW covers those).
+pub(crate) fn compress64(block: &[u64], dtype: DType, clevel: usize) -> Option<Vec<u8>> {
     if block.is_empty() {
         return None;
     }
-    let cfg = &ChunkConfig::default().with_compression_level(clevel);
     match dtype {
-        DType::F64 => compress_as!(block, cfg, f64, f64::from_bits),
-        DType::F32 => compress_as!(block, cfg, f32, |v| f64::from_bits(v) as f32),
-        DType::I64 => compress_as!(block, cfg, i64, |v| v as i64),
-        DType::U64 => compress_as!(block, cfg, u64, |v| v),
-        DType::I32 => compress_as!(block, cfg, i32, |v| v as u32 as i32),
-        DType::U32 => compress_as!(block, cfg, u32, |v| v as u32),
-        // Decimals never reach here directly: their limb engine lowers each limb
-        // to a U64/I64 lane, which is handled above.
-        DType::Decimal128 | DType::Decimal256 => None,
+        DType::F64 => compress_as::<u64, f64>(block, clevel),
+        DType::I64 => compress_as::<u64, i64>(block, clevel),
+        DType::U64 => compress_as::<u64, u64>(block, clevel),
+        _ => None,
     }
 }
 
-/// Map a decoded pco `Vec<$t>` back to the quoin `u64` lane (via `$from`, the
-/// inverse of `to_lane`), checking the count.
-macro_rules! decompress_to {
-    ($payload:expr, $n:expr, $t:ty, $from:expr) => {{
-        let nums: Vec<$t> = simple_decompress::<$t>($payload).map_err(|_| PCO_CORRUPT)?;
-        if nums.len() != $n {
-            return Err(PCO_CORRUPT);
-        }
-        nums.into_iter().map($from).collect()
-    }};
+pub(crate) fn decompress64(payload: &[u8], n: usize, dtype: DType) -> Result<Vec<u64>, Error> {
+    match dtype {
+        DType::F64 => decompress_as::<u64, f64>(payload, n, f64::to_bits),
+        DType::I64 => decompress_as::<u64, i64>(payload, n, |x| x as u64),
+        DType::U64 => decompress_as::<u64, u64>(payload, n, |x| x),
+        _ => Err(PCO_CORRUPT),
+    }
 }
 
-const PCO_CORRUPT: Error = Error::CorruptPayload("pco decode");
+/// Compress a 32-bit-lane block (`f32`/`i32`/`u32`) — pco's native `f32`
+/// codec path, straight from the lane.
+pub(crate) fn compress32(block: &[u32], dtype: DType, clevel: usize) -> Option<Vec<u8>> {
+    if block.is_empty() {
+        return None;
+    }
+    match dtype {
+        DType::F32 => compress_as::<u32, f32>(block, clevel),
+        DType::I32 => compress_as::<u32, i32>(block, clevel),
+        DType::U32 => compress_as::<u32, u32>(block, clevel),
+        _ => None,
+    }
+}
 
-/// Decompress a pco block back to the quoin `u64` lane (`n` values).
-pub(crate) fn decode(payload: &[u8], n: usize, dtype: DType) -> Result<Vec<u64>, Error> {
-    Ok(match dtype {
-        DType::F64 => decompress_to!(payload, n, f64, |x: f64| x.to_bits()),
-        DType::F32 => decompress_to!(payload, n, f32, |x: f32| (x as f64).to_bits()),
-        DType::I64 => decompress_to!(payload, n, i64, |x: i64| x as u64),
-        DType::U64 => decompress_to!(payload, n, u64, |x: u64| x),
-        DType::I32 => decompress_to!(payload, n, i32, |x: i32| x as i64 as u64),
-        DType::U32 => decompress_to!(payload, n, u32, |x: u32| u64::from(x)),
-        DType::Decimal128 | DType::Decimal256 => return Err(PCO_CORRUPT),
-    })
+pub(crate) fn decompress32(payload: &[u8], n: usize, dtype: DType) -> Result<Vec<u32>, Error> {
+    match dtype {
+        DType::F32 => decompress_as::<u32, f32>(payload, n, f32::to_bits),
+        DType::I32 => decompress_as::<u32, i32>(payload, n, |x| x as u32),
+        DType::U32 => decompress_as::<u32, u32>(payload, n, |x| x),
+        _ => Err(PCO_CORRUPT),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn roundtrip(block: &[u64], dtype: DType) {
-        let enc = encode(block, dtype, 8).expect("pco should encode");
-        let dec = decode(&enc, block.len(), dtype).expect("pco should decode");
+    fn roundtrip64(block: &[u64], dtype: DType) {
+        let enc = compress64(block, dtype, 8).expect("pco should encode");
+        let dec = decompress64(&enc, block.len(), dtype).expect("pco should decode");
         assert_eq!(dec, block, "lane roundtrip for {dtype:?}");
+    }
+
+    fn roundtrip32(block: &[u32], dtype: DType) -> usize {
+        let enc = compress32(block, dtype, 8).expect("pco should encode");
+        let dec = decompress32(&enc, block.len(), dtype).expect("pco should decode");
+        assert_eq!(dec, block, "lane roundtrip for {dtype:?}");
+        enc.len()
     }
 
     #[test]
@@ -92,27 +118,41 @@ mod tests {
             .map(|i| (i as f64 * 0.5).to_bits())
             .chain([f64::NAN.to_bits(), 0.0_f64.to_bits(), (-0.0_f64).to_bits()])
             .collect();
-        roundtrip(&f64s, DType::F64);
-
-        // f32: lane holds the widened f64.
-        let f32s: Vec<u64> = (0..1000)
-            .map(|i| ((i as f32 * 1.25) as f64).to_bits())
-            .collect();
-        roundtrip(&f32s, DType::F32);
-
-        // i64 / u64 / i32 / u32, including negatives (sign-extended lanes).
+        roundtrip64(&f64s, DType::F64);
         let i64s: Vec<u64> = (-500i64..500).map(|i| i as u64).collect();
-        roundtrip(&i64s, DType::I64);
+        roundtrip64(&i64s, DType::I64);
         let u64s: Vec<u64> = (0..1000u64).map(|i| i.wrapping_mul(7)).collect();
-        roundtrip(&u64s, DType::U64);
-        let i32s: Vec<u64> = (-500i32..500).map(|i| i as i64 as u64).collect();
-        roundtrip(&i32s, DType::I32);
-        let u32s: Vec<u64> = (0..1000u32).map(u64::from).collect();
-        roundtrip(&u32s, DType::U32);
+        roundtrip64(&u64s, DType::U64);
+
+        // f32 straight from the lane, with every special pattern bit-exact.
+        let f32s: Vec<u32> = (0..1000)
+            .map(|i| (i as f32 * 1.25).to_bits())
+            .chain([0x7F80_0001, 0xFFC0_1234, 0x8000_0000, 1, 0x7F7F_FFFF])
+            .collect();
+        roundtrip32(&f32s, DType::F32);
+        let i32s: Vec<u32> = (-500i32..500).map(|i| i as u32).collect();
+        roundtrip32(&i32s, DType::I32);
+        let u32s: Vec<u32> = (0..1000u32).map(|i| i.wrapping_mul(7)).collect();
+        roundtrip32(&u32s, DType::U32);
+    }
+
+    #[test]
+    fn f32_is_encoded_as_f32() {
+        // The f32 encoding must be identical to what pco produces for the same
+        // `&[f32]` directly — proof that no f64 bridge is involved.
+        let vals: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.01).sin() * 100.0).collect();
+        let lane: Vec<u32> = vals.iter().map(|v| v.to_bits()).collect();
+        let via_lane = compress32(&lane, DType::F32, 8).unwrap();
+        let direct =
+            simple_compress::<f32>(&vals, &ChunkConfig::default().with_compression_level(8))
+                .unwrap();
+        assert_eq!(via_lane, direct);
     }
 
     #[test]
     fn empty_block_bails() {
-        assert!(encode(&[], DType::F64, 8).is_none());
+        assert!(compress64(&[], DType::F64, 8).is_none());
+        assert!(compress32(&[], DType::F32, 8).is_none());
+        assert!(compress32(&[1, 2], DType::F64, 8).is_none());
     }
 }

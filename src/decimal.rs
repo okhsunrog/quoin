@@ -21,7 +21,7 @@ use crate::Config;
 use crate::decoder::decompress_lane;
 use crate::dtype::DType;
 use crate::error::Error;
-use crate::format::{FLAG_DECIMAL, FLAG_VALIDITY, HEADER_LEN, MAGIC, VERSION};
+use crate::format::{FLAG_DECIMAL, FLAG_VALIDITY, HEADER_LEN, LEGACY_VERSION, MAGIC, VERSION};
 
 /// Offset of the decimal metadata within the container (right after the header).
 const META_OFF: usize = HEADER_LEN;
@@ -104,7 +104,8 @@ fn parse_shell(src: &[u8], expect: DType) -> Result<Shell, Error> {
     if src[0..4] != MAGIC {
         return Err(Error::BadMagic);
     }
-    if src[4] != VERSION {
+    // v2 containers are byte-identical to v3 (the limbs are 64-bit lanes).
+    if src[4] != VERSION && src[4] != LEGACY_VERSION {
         return Err(Error::UnsupportedVersion(src[4]));
     }
     if src[5] & FLAG_DECIMAL == 0 {
@@ -149,7 +150,7 @@ fn parse_shell(src: &[u8], expect: DType) -> Result<Shell, Error> {
         let end = pos.checked_add(sublen).ok_or(Error::Truncated)?;
         let sub = src.get(pos..end).ok_or(Error::Truncated)?;
         pos = end;
-        let (_dt, lane, _val) = decompress_lane(sub)?;
+        let (_dt, lane, _val) = decompress_lane::<u64>(sub)?;
         if lane.len() != n_valid {
             return Err(Error::CorruptPayload("decimal limb length"));
         }

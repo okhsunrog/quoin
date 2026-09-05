@@ -1,7 +1,8 @@
 //! DICT: dictionary-encode low-cardinality columns. Distinct values map to small
-//! integer codes; the dictionary holds the distinct values verbatim. Wins on
-//! columns with few distinct values whose repeats are scattered (where RLE's
-//! runs don't help). Type-agnostic — operates on the raw `u64` lane.
+//! integer codes; the dictionary holds the distinct values verbatim (one lane
+//! word each — 4 bytes on a 32-bit lane). Wins on columns with few distinct
+//! values whose repeats are scattered (where RLE's runs don't help).
+//! Type-agnostic — operates on the raw lane.
 //!
 //! Two independent streams are each stored in whichever form is smallest:
 //!
@@ -27,6 +28,7 @@
 use crate::codecs::{delta_bitpack, for_bitpack, transpose};
 use crate::entropy::{code_residuals, decode_residuals};
 use crate::error::Error;
+use crate::lane::Lane;
 use crate::varint;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
@@ -47,18 +49,14 @@ fn plane_count(card: usize) -> usize {
 
 /// Encode the (sorted) dictionary values, smallest of raw / delta→bitpack /
 /// transpose→entropy. Returns `(tag, blob)`.
-pub(crate) fn encode_values(
-    sorted: &[u64],
+pub(crate) fn encode_values<L: Lane>(
+    sorted: &[L],
     entropy: bool,
     lambda: u64,
     allow_lz: bool,
 ) -> (u8, Vec<u8>) {
-    let mut raw = Vec::with_capacity(sorted.len() * 8);
-    for &d in sorted {
-        raw.extend_from_slice(&d.to_le_bytes());
-    }
     let mut tag = VAL_RAW;
-    let mut blob = raw;
+    let mut blob = L::le_bytes(sorted).into_owned();
 
     let delta = delta_bitpack::encode(sorted);
     if delta.len() < blob.len() {
@@ -76,46 +74,48 @@ pub(crate) fn encode_values(
 }
 
 /// Inverse of [`encode_values`] — reconstruct `card` dictionary values.
-pub(crate) fn decode_values(tag: u8, blob: &[u8], card: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn decode_values<L: Lane>(tag: u8, blob: &[u8], card: usize) -> Result<Vec<L>, Error> {
     match tag {
         VAL_RAW => {
-            if blob.len() != card * 8 {
+            if blob.len() != card * L::BYTES {
                 return Err(Error::CorruptPayload("dict raw values length"));
             }
-            Ok(blob
-                .chunks_exact(8)
-                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-                .collect())
+            Ok(L::from_le_bytes(blob))
         }
-        VAL_DELTA => delta_bitpack::decode(blob, card),
+        VAL_DELTA => delta_bitpack::decode::<L>(blob, card),
         VAL_TRANSPOSE => {
-            let bytes = decode_residuals(blob, card * 8)?;
-            if bytes.len() != card * 8 {
+            let bytes = decode_residuals(blob, card * L::BYTES)?;
+            if bytes.len() != card * L::BYTES {
                 return Err(Error::CorruptPayload("dict transpose values length"));
             }
-            transpose::decode(&bytes, card)
+            transpose::decode::<L>(&bytes, card)
         }
         _ => Err(Error::CorruptPayload("dict value tag")),
     }
 }
 
-pub(crate) fn encode(vals: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -> Option<Vec<u8>> {
+pub(crate) fn encode<L: Lane>(
+    vals: &[L],
+    entropy: bool,
+    lambda: u64,
+    allow_lz: bool,
+) -> Option<Vec<u8>> {
     if vals.is_empty() {
         return None;
     }
     // Above 50% cardinality the codes approach raw width and the dictionary is
     // huge — not worth it. Bail early to cap the cost on high-distinct blocks.
     let max_card = vals.len() / 2 + 1;
-    let mut map: HashMap<u64, u32> = HashMap::new();
-    let mut dict: Vec<u64> = Vec::new();
-    let mut codes: Vec<u64> = Vec::with_capacity(vals.len());
+    let mut map: HashMap<L, u32> = HashMap::new();
+    let mut dict: Vec<L> = Vec::new();
+    let mut codes: Vec<u32> = Vec::with_capacity(vals.len());
     for &v in vals {
         let code = *map.entry(v).or_insert_with(|| {
             let c = dict.len() as u32;
             dict.push(v);
             c
         });
-        codes.push(u64::from(code));
+        codes.push(code);
         if dict.len() > max_card {
             return None;
         }
@@ -130,10 +130,11 @@ pub(crate) fn encode(vals: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -
     for (new, &old) in order.iter().enumerate() {
         remap[old as usize] = new as u32;
     }
-    let sorted: Vec<u64> = order.iter().map(|&old| dict[old as usize]).collect();
-    for c in codes.iter_mut() {
-        *c = u64::from(remap[*c as usize]);
-    }
+    let sorted: Vec<L> = order.iter().map(|&old| dict[old as usize]).collect();
+    let codes: Vec<L> = codes
+        .iter()
+        .map(|&c| L::from_u64(u64::from(remap[c as usize])))
+        .collect();
 
     let (val_tag, val_blob) = encode_values(&sorted, entropy, lambda, allow_lz);
     let codes_section = encode_codes_section(&codes, sorted.len(), entropy, lambda, allow_lz);
@@ -149,8 +150,8 @@ pub(crate) fn encode(vals: &[u64], entropy: bool, lambda: u64, allow_lz: bool) -
 
 /// Encode the codes stream: `code_tag ++ blob` — the smaller of bit-packed
 /// (random-access) or, when the level allows entropy, byte-plane entropy-coded.
-fn encode_codes_section(
-    codes: &[u64],
+fn encode_codes_section<L: Lane>(
+    codes: &[L],
     card: usize,
     entropy: bool,
     lambda: u64,
@@ -162,7 +163,10 @@ fn encode_codes_section(
         let nbytes = plane_count(card);
         let mut blob = vec![nbytes as u8];
         for p in 0..nbytes {
-            let plane: Vec<u8> = codes.iter().map(|&c| (c >> (8 * p)) as u8).collect();
+            let plane: Vec<u8> = codes
+                .iter()
+                .map(|&c| (c.to_u64() >> (8 * p)) as u8)
+                .collect();
             let coded = code_residuals(&plane, lambda, allow_lz);
             varint::write_u64(&mut blob, coded.len() as u64);
             blob.extend_from_slice(&coded);
@@ -179,19 +183,19 @@ fn encode_codes_section(
 }
 
 /// Inverse of [`encode_codes_section`]: decode `n` codes from `code_tag ++ blob`.
-fn decode_codes_section(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+fn decode_codes_section<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
     let mut pos = 0usize;
     let tag = *payload.get(pos).ok_or(Error::Truncated)?;
     pos += 1;
     match tag {
-        CODES_BITPACK => for_bitpack::decode(&payload[pos..], n, false),
+        CODES_BITPACK => for_bitpack::decode::<L>(&payload[pos..], n, false),
         CODES_ENTROPY => {
             let nbytes = usize::from(*payload.get(pos).ok_or(Error::Truncated)?);
             pos += 1;
             if !(1..=2).contains(&nbytes) {
                 return Err(Error::CorruptPayload("dict plane count"));
             }
-            let mut codes = vec![0u64; n];
+            let mut codes = vec![L::ZERO; n];
             for p in 0..nbytes {
                 let len = varint::read_u64(payload, &mut pos)? as usize;
                 let blob = payload.get(pos..pos + len).ok_or(Error::Truncated)?;
@@ -201,7 +205,7 @@ fn decode_codes_section(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
                     return Err(Error::CorruptPayload("dict plane length"));
                 }
                 for (c, &b) in codes.iter_mut().zip(&plane) {
-                    *c |= u64::from(b) << (8 * p);
+                    *c = *c | L::from_u64(u64::from(b) << (8 * p));
                 }
             }
             Ok(codes)
@@ -210,7 +214,7 @@ fn decode_codes_section(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
     }
 }
 
-pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn decode<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
     let mut pos = 0usize;
     let card = varint::read_u64(payload, &mut pos)? as usize;
     if card > n {
@@ -223,13 +227,13 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
     let val_len = varint::read_u64(payload, &mut pos)? as usize;
     let val_blob = payload.get(pos..pos + val_len).ok_or(Error::Truncated)?;
     pos += val_len;
-    let dict = decode_values(val_tag, val_blob, card)?;
+    let dict = decode_values::<L>(val_tag, val_blob, card)?;
 
-    let codes = decode_codes_section(&payload[pos..], n)?;
+    let codes = decode_codes_section::<L>(&payload[pos..], n)?;
 
     let mut out = Vec::with_capacity(n);
     for c in codes {
-        let idx = c as usize;
+        let idx = c.to_u64() as usize;
         if idx >= card {
             return Err(Error::CorruptPayload("dict code out of range"));
         }
@@ -250,9 +254,9 @@ const SHARED_MAX_CARD: usize = 1 << 20;
 
 /// Column-wide dictionary context, built once per column by the encoder and
 /// shared (read-only) across the per-block competitions.
-pub(crate) struct SharedDict {
+pub(crate) struct SharedDict<L: Lane> {
     /// value → code in the sorted table.
-    map: FxHashMap<u64, u32>,
+    map: FxHashMap<L, u32>,
     /// Cardinality of the table.
     pub(crate) card: usize,
     /// Encoded preamble body: `varint(card) ++ val_tag ++ varint(len) ++ blob`.
@@ -262,18 +266,18 @@ pub(crate) struct SharedDict {
 /// Build the column-wide table over the full (valid-values) lane, or `None`
 /// when the column is too high-cardinality to profit (> 50% distinct, like the
 /// per-block bail) or exceeds [`SHARED_MAX_CARD`].
-pub(crate) fn build_shared(
-    vals: &[u64],
+pub(crate) fn build_shared<L: Lane>(
+    vals: &[L],
     entropy: bool,
     lambda: u64,
     allow_lz: bool,
-) -> Option<SharedDict> {
+) -> Option<SharedDict<L>> {
     if vals.is_empty() {
         return None;
     }
     let max_card = (vals.len() / 2 + 1).min(SHARED_MAX_CARD);
-    let mut map: FxHashMap<u64, u32> = FxHashMap::default();
-    let mut dict: Vec<u64> = Vec::new();
+    let mut map: FxHashMap<L, u32> = FxHashMap::default();
+    let mut dict: Vec<L> = Vec::new();
     for &v in vals {
         map.entry(v).or_insert_with(|| {
             let c = dict.len() as u32;
@@ -293,7 +297,7 @@ pub(crate) fn build_shared(
     for (new, &old) in order.iter().enumerate() {
         remap[old as usize] = new as u32;
     }
-    let sorted: Vec<u64> = order.iter().map(|&old| dict[old as usize]).collect();
+    let sorted: Vec<L> = order.iter().map(|&old| dict[old as usize]).collect();
     for c in map.values_mut() {
         *c = remap[*c as usize];
     }
@@ -315,7 +319,10 @@ pub(crate) fn build_shared(
 /// cardinality (distinct ≤ valid values) against corrupt streams; the encoder
 /// never emits more than [`SHARED_MAX_CARD`], so that also hard-caps the
 /// table allocation regardless of the declared column size.
-pub(crate) fn decode_shared_preamble(blob: &[u8], n_total: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn decode_shared_preamble<L: Lane>(
+    blob: &[u8],
+    n_total: usize,
+) -> Result<Vec<L>, Error> {
     let mut pos = 0usize;
     let card = varint::read_u64(blob, &mut pos)? as usize;
     if card == 0 || card > n_total || card > SHARED_MAX_CARD {
@@ -328,15 +335,15 @@ pub(crate) fn decode_shared_preamble(blob: &[u8], n_total: usize) -> Result<Vec<
     if end != blob.len() {
         return Err(Error::CorruptPayload("shared dict preamble length"));
     }
-    decode_values(val_tag, &blob[pos..end], card)
+    decode_values::<L>(val_tag, &blob[pos..end], card)
 }
 
 /// Encode one block as codes into the shared table (the frame payload is just a
 /// codes section). Returns `None` on an empty block or a value missing from the
 /// table (impossible for a table built over the same column; defensive).
-pub(crate) fn encode_shared(
-    vals: &[u64],
-    sd: &SharedDict,
+pub(crate) fn encode_shared<L: Lane>(
+    vals: &[L],
+    sd: &SharedDict<L>,
     entropy: bool,
     lambda: u64,
     allow_lz: bool,
@@ -344,20 +351,26 @@ pub(crate) fn encode_shared(
     if vals.is_empty() {
         return None;
     }
-    let mut codes = Vec::with_capacity(vals.len());
+    let mut codes: Vec<L> = Vec::with_capacity(vals.len());
     for v in vals {
         debug_assert!(sd.map.contains_key(v), "shared dict must cover the column");
-        codes.push(u64::from(*sd.map.get(v)?));
+        codes.push(L::from_u64(u64::from(*sd.map.get(v)?)));
     }
-    Some(encode_codes_section(&codes, sd.card, entropy, lambda, allow_lz))
+    Some(encode_codes_section(
+        &codes, sd.card, entropy, lambda, allow_lz,
+    ))
 }
 
 /// Decode a `DICT_SHARED` frame given the stream's decoded value table.
-pub(crate) fn decode_shared(payload: &[u8], n: usize, table: &[u64]) -> Result<Vec<u64>, Error> {
-    let codes = decode_codes_section(payload, n)?;
+pub(crate) fn decode_shared<L: Lane>(
+    payload: &[u8],
+    n: usize,
+    table: &[L],
+) -> Result<Vec<L>, Error> {
+    let codes = decode_codes_section::<L>(payload, n)?;
     let mut out = Vec::with_capacity(n);
     for c in codes {
-        let idx = c as usize;
+        let idx = c.to_u64() as usize;
         if idx >= table.len() {
             return Err(Error::CorruptPayload("shared dict code out of range"));
         }
@@ -370,11 +383,11 @@ pub(crate) fn decode_shared(payload: &[u8], n: usize, table: &[u64]) -> Result<V
 mod tests {
     use super::*;
 
-    fn roundtrip(vals: &[u64]) -> Option<usize> {
+    fn roundtrip<L: Lane>(vals: &[L]) -> Option<usize> {
         // Exercise both code representations.
         for (entropy, lambda) in [(false, 0u64), (true, 0u64), (true, 4u64)] {
             let enc = encode(vals, entropy, lambda, true)?;
-            assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
+            assert_eq!(decode::<L>(&enc, vals.len()).unwrap(), vals);
         }
         Some(encode(vals, true, 0, true)?.len())
     }
@@ -395,12 +408,21 @@ mod tests {
             "16-distinct column should pack to <1 B/value, got {}",
             size as f64 / vals.len() as f64
         );
+        // Same on the 32-bit lane (e.g. 16 distinct f32 pressure levels).
+        let vals32: Vec<u32> = vals
+            .iter()
+            .map(|&v| ((v % 16) as f32 * 0.125).to_bits())
+            .collect();
+        let size32 = roundtrip(&vals32).expect("should encode");
+        assert!(size32 < vals32.len());
     }
 
     #[test]
     fn high_cardinality_bails() {
         let vals: Vec<u64> = (0..10000u64).collect(); // all distinct
         assert!(encode(&vals, true, 0, true).is_none());
+        let vals32: Vec<u32> = (0..10000u32).collect();
+        assert!(encode(&vals32, true, 0, true).is_none());
     }
 
     #[test]
@@ -440,7 +462,10 @@ mod tests {
             blob.len(),
             sorted.len() * 8
         );
-        assert_eq!(decode_values(tag, &blob, sorted.len()).unwrap(), sorted);
+        assert_eq!(
+            decode_values::<u64>(tag, &blob, sorted.len()).unwrap(),
+            sorted
+        );
 
         // And a full high-cardinality round-trip through the codec.
         let mut s = 1u64;
@@ -451,7 +476,18 @@ mod tests {
             })
             .collect();
         let enc = encode(&vals, true, 0, true).unwrap();
-        assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
+        assert_eq!(decode::<u64>(&enc, vals.len()).unwrap(), vals);
+
+        // 32-bit lane: the sorted f32 table also compresses below 4 B/entry.
+        let sorted32: Vec<u32> = (0..20000)
+            .map(|i| (1000.0_f32 + i as f32 * 0.01).to_bits())
+            .collect();
+        let (tag, blob) = encode_values(&sorted32, true, 0, true);
+        assert!(blob.len() < sorted32.len() * 4);
+        assert_eq!(
+            decode_values::<u32>(tag, &blob, sorted32.len()).unwrap(),
+            sorted32
+        );
     }
 
     #[test]
@@ -466,12 +502,15 @@ mod tests {
             .collect();
         // exercises the 2-plane entropy path and bitpack, both must round-trip
         roundtrip(&vals);
+        let vals32: Vec<u32> = vals.iter().map(|&v| v as u32).collect();
+        roundtrip(&vals32);
     }
 
     #[test]
     fn edges() {
-        assert!(encode(&[], true, 0, true).is_none());
+        assert!(encode::<u64>(&[], true, 0, true).is_none());
         roundtrip(&vec![7u64; 1000]);
+        roundtrip(&vec![7u32; 1000]);
     }
 
     #[test]
@@ -491,13 +530,22 @@ mod tests {
                 table[((s >> 40) as usize + i) % table.len()]
             })
             .collect();
+        let vals32: Vec<u32> = vals.iter().map(|&v| (v >> 32) as u32).collect();
 
         for (entropy, lambda) in [(true, 0u64), (true, 2u64), (false, 0u64)] {
             let sd = build_shared(&vals, entropy, lambda, false).expect("should build");
             let decoded_table =
-                decode_shared_preamble(&sd.preamble, vals.len()).expect("preamble");
+                decode_shared_preamble::<u64>(&sd.preamble, vals.len()).expect("preamble");
             assert_eq!(decoded_table.len(), sd.card);
             for block in vals.chunks(4096) {
+                let payload = encode_shared(block, &sd, entropy, lambda, false).unwrap();
+                let out = decode_shared(&payload, block.len(), &decoded_table).unwrap();
+                assert_eq!(out, block);
+            }
+            let sd = build_shared(&vals32, entropy, lambda, false).expect("should build");
+            let decoded_table =
+                decode_shared_preamble::<u32>(&sd.preamble, vals32.len()).expect("preamble");
+            for block in vals32.chunks(4096) {
                 let payload = encode_shared(block, &sd, entropy, lambda, false).unwrap();
                 let out = decode_shared(&payload, block.len(), &decoded_table).unwrap();
                 assert_eq!(out, block);

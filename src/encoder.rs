@@ -2,26 +2,29 @@
 //!
 //! Blocks are adaptively sized (256 KiB base, grown to 1 MiB for low-entropy
 //! data; the ratio-first levels use 1 MiB outright — see [`plan_blocks`]),
-//! matching `fc`'s quantum range. Cheap per-block
-//! features ([`probe_block_features`]) then gate which mode families are worth
-//! trying; each applicable mode encodes the block and the smallest output wins.
-//! Blocks are independent, so with the `parallel` feature they are encoded
-//! across a rayon pool.
+//! matching `fc`'s quantum range; the quanta are **bytes**, so a 32-bit lane
+//! holds twice the values per block. Cheap per-block features
+//! ([`probe_block_features`]) then gate which mode families are worth trying;
+//! each applicable mode encodes the block and the smallest output wins. Blocks
+//! are independent, so with the `parallel` feature they are encoded across a
+//! rayon pool. Everything is generic over the [`Lane`], so a 32-bit column
+//! competes at its native width.
 
 use crate::codecs::{
-    alp, alp_rd, const_block, delta_bitpack, dict, float_mult, for_bitpack, linear, lz, pcodec,
-    pred, raw, rle, stride, transpose, xorz,
+    alp, alp_rd, const_block, delta_bitpack, dict, float_mult, for_bitpack, linear, lz, pred, raw,
+    rle, stride, transpose, xorz,
 };
 use crate::dtype::{DType, Family};
 use crate::entropy::{code_residuals, estimate_order1_bytes};
-use crate::format::{FRAME_HEADER_LEN, Header};
+use crate::format::{FRAME_HEADER_LEN, Header, MAX_BLOCK_BYTES};
+use crate::lane::Lane;
 use crate::mode::Mode;
 use crate::{Config, Level, Selection};
 
 /// Float-value codecs: valid only when the column is a float family. On an
 /// integer column they'd run float arithmetic on the lane bits — meaningless,
 /// so they're gated out. Every other mode is type-agnostic (operates on the
-/// raw `u64` lane) and applies to both families.
+/// raw lane words) and applies to both families.
 fn mode_applies(mode: Mode, family: Family) -> bool {
     match mode {
         Mode::Delta2 | Mode::DeltaDp | Mode::FloatMult | Mode::Alp | Mode::AlpRd => {
@@ -64,12 +67,7 @@ fn mode_runs(mode: Mode, family: Family, level: Level) -> bool {
 fn is_predictor_mode(mode: Mode) -> bool {
     matches!(
         mode,
-        Mode::Pred
-            | Mode::PredRc
-            | Mode::Pred2
-            | Mode::Delta2
-            | Mode::DeltaDp
-            | Mode::OrderedDelta
+        Mode::Pred | Mode::PredRc | Mode::Pred2 | Mode::Delta2 | Mode::DeltaDp | Mode::OrderedDelta
     )
 }
 
@@ -140,23 +138,30 @@ impl Best {
     }
 }
 
-/// Default block: 32768 * 8 B = 256 KiB, matching `fc`'s base quantum. Kept
-/// small so noisy/incompressible data parallelizes well.
-const BASE_QUANTUM: usize = 32 * 1024;
-/// Grown block for low-entropy data: 128 Ki * 8 B = 1 MiB (== `MAX_BLOCK_VALUES`).
-/// Bigger blocks give LZ a larger window and entropy models more data to adapt,
-/// at no parallelism cost since such blocks compress to almost nothing.
-const MAX_QUANTUM: usize = crate::format::MAX_BLOCK_VALUES;
+/// Default block: 256 KiB of lane data (32 Ki × 8 B or 64 Ki × 4 B), matching
+/// `fc`'s base quantum. Kept small so noisy/incompressible data parallelizes well.
+const BASE_QUANTUM_BYTES: usize = 256 * 1024;
+/// Grown block for low-entropy data: 1 MiB (== `MAX_BLOCK_BYTES`). Bigger
+/// blocks give LZ a larger window and entropy models more data to adapt, at no
+/// parallelism cost since such blocks compress to almost nothing.
+const MAX_QUANTUM_BYTES: usize = MAX_BLOCK_BYTES;
 
 /// Plan block boundaries. With a fixed `block_size` (from [`Config::block_size`])
 /// every block is exactly that many values (the last may be shorter). Otherwise
-/// the ratio-first levels ([`Level::full_blocks`]) use `MAX_QUANTUM` outright —
+/// the ratio-first levels ([`Level::full_blocks`]) use the max quantum outright —
 /// the wider LZ/dict/entropy window never lost ratio on the corpus — while the
-/// fast levels probe each base-quantum region and grow it to `MAX_QUANTUM` only
-/// when it looks low-entropy (dictionary / constant / run-heavy), keeping small
-/// blocks for random access and parallelism on noisy data.
-fn plan_blocks(vals: &[u64], block_size: Option<usize>, level: Level) -> Vec<(usize, usize)> {
+/// fast levels probe each base-quantum region and grow it to the max quantum
+/// only when it looks low-entropy (dictionary / constant / run-heavy), keeping
+/// small blocks for random access and parallelism on noisy data. Quanta are
+/// bytes (`BASE_QUANTUM_BYTES` / `MAX_QUANTUM_BYTES`) divided by the lane width.
+fn plan_blocks<L: Lane>(
+    vals: &[L],
+    block_size: Option<usize>,
+    level: Level,
+) -> Vec<(usize, usize)> {
     let n = vals.len();
+    let base_quantum = BASE_QUANTUM_BYTES / L::BYTES;
+    let max_quantum = MAX_QUANTUM_BYTES / L::BYTES;
     let mut ranges = Vec::new();
     let mut start = 0;
     if let Some(bs) = block_size {
@@ -169,17 +174,17 @@ fn plan_blocks(vals: &[u64], block_size: Option<usize>, level: Level) -> Vec<(us
     }
     if level.full_blocks() {
         while start < n {
-            let end = (start + MAX_QUANTUM).min(n);
+            let end = (start + max_quantum).min(n);
             ranges.push((start, end));
             start = end;
         }
         return ranges;
     }
     while start < n {
-        let base_end = (start + BASE_QUANTUM).min(n);
+        let base_end = (start + base_quantum).min(n);
         let feats = probe_block_features(&vals[start..base_end]);
         let end = if feats.distinct_low || feats.looks_like_repeats {
-            (start + MAX_QUANTUM).min(n)
+            (start + max_quantum).min(n)
         } else {
             base_end
         };
@@ -189,20 +194,22 @@ fn plan_blocks(vals: &[u64], block_size: Option<usize>, level: Level) -> Vec<(us
     ranges
 }
 
-/// Compress a column already lowered to its `u64` lane (see [`DType`] for the
+/// Compress a column already lowered to its lane (see [`DType`] for the
 /// mapping). `vals` holds only the **valid** values (nulls already compacted
 /// out); `logical_n` is the full length including nulls; `validity`, when present,
-/// is the bitmap to store. The `dtype` selects the codec family.
-pub(crate) fn compress_lane(
-    vals: &[u64],
+/// is the bitmap to store. The `dtype` selects the codec family and must be one
+/// of `L`'s types.
+pub(crate) fn compress_lane<L: Lane>(
+    vals: &[L],
     dtype: DType,
     logical_n: usize,
     validity: Option<&[u8]>,
     cfg: Config,
 ) -> Vec<u8> {
+    debug_assert_eq!(dtype.lane_bytes(), L::BYTES, "dtype must match the lane");
     let predictor_log2 = cfg.clamped_predictor_log2();
     let level = cfg.level;
-    let ranges = plan_blocks(vals, cfg.fixed_block_size(), level);
+    let ranges = plan_blocks(vals, cfg.fixed_block_size(L::BYTES), level);
 
     // Column-wide shared value dictionary: only worth probing on multi-block
     // columns (a single block already sees the whole column), at the ratio-first
@@ -233,8 +240,14 @@ pub(crate) fn compress_lane(
         } else {
             for (i, &(s, e)) in ranges.iter().enumerate() {
                 if results[i].1 > 0 {
-                    results[i] =
-                        encode_block(&vals[s..e], predictor_log2, cfg.selection, dtype, level, None);
+                    results[i] = encode_block(
+                        &vals[s..e],
+                        predictor_log2,
+                        cfg.selection,
+                        dtype,
+                        level,
+                        None,
+                    );
                 }
             }
         }
@@ -273,13 +286,13 @@ pub(crate) fn compress_lane(
 type FrameResult = (Vec<u8>, usize);
 
 #[cfg(feature = "parallel")]
-fn build_frames(
-    vals: &[u64],
+fn build_frames<L: Lane>(
+    vals: &[L],
     ranges: &[(usize, usize)],
     predictor_log2: u8,
     dtype: DType,
     cfg: &Config,
-    shared: Option<&dict::SharedDict>,
+    shared: Option<&dict::SharedDict<L>>,
 ) -> Vec<FrameResult> {
     use rayon::prelude::*;
     let (sel, level) = (cfg.selection, cfg.level);
@@ -299,29 +312,36 @@ fn build_frames(
 }
 
 #[cfg(not(feature = "parallel"))]
-fn build_frames(
-    vals: &[u64],
+fn build_frames<L: Lane>(
+    vals: &[L],
     ranges: &[(usize, usize)],
     predictor_log2: u8,
     dtype: DType,
     cfg: &Config,
-    shared: Option<&dict::SharedDict>,
+    shared: Option<&dict::SharedDict<L>>,
 ) -> Vec<FrameResult> {
     ranges
         .iter()
         .map(|&(s, e)| {
-            encode_block(&vals[s..e], predictor_log2, cfg.selection, dtype, cfg.level, shared)
+            encode_block(
+                &vals[s..e],
+                predictor_log2,
+                cfg.selection,
+                dtype,
+                cfg.level,
+                shared,
+            )
         })
         .collect()
 }
 
-fn encode_block(
-    block: &[u64],
+fn encode_block<L: Lane>(
+    block: &[L],
     predictor_log2: u8,
     sel: Selection,
     dtype: DType,
     level: Level,
-    shared: Option<&dict::SharedDict>,
+    shared: Option<&dict::SharedDict<L>>,
 ) -> FrameResult {
     match sel {
         Selection::Full => encode_block_full(block, predictor_log2, dtype, level, shared),
@@ -347,12 +367,12 @@ fn coded_if_competitive(
     Some(code_residuals(res, lambda, allow_lz))
 }
 
-fn encode_block_full(
-    block: &[u64],
+fn encode_block_full<L: Lane>(
+    block: &[L],
     predictor_log2: u8,
     dtype: DType,
     level: Level,
-    shared: Option<&dict::SharedDict>,
+    shared: Option<&dict::SharedDict<L>>,
 ) -> FrameResult {
     let family = dtype.family();
     let entropy = level.allows_entropy();
@@ -365,29 +385,21 @@ fn encode_block_full(
     // apply the cascade to that one winner below — turning ~8 LZ passes into 1.
     let cascade_lz = level.allows_lz_cascade();
     let allow_lz = false;
-    let decoded_bytes = block.len() * dtype.lane_bytes();
-    let raw_bytes = block.len() * 8;
+    let decoded_bytes = block.len() * L::BYTES;
+    let raw_bytes = decoded_bytes;
     let feats = probe_block_features(block);
 
     // Early-out: a genuinely incompressible integer block (full value *and* delta
     // range, high-distinct, no repeats) can't beat RAW at any level — skip the
     // whole competition, including the costly predictor pass. Float families keep
     // trying (ALP/ALP-RD/predictors can win on data this probe can't read).
-    if family == Family::Int && looks_incompressible(block, &feats, dtype.lane_bytes()) {
+    if family == Family::Int && looks_incompressible(block, &feats) {
         crate::diag::record_win(Mode::Raw.id());
-        return (
-            frame_bytes(Mode::Raw, block.len(), &raw::encode(block, dtype)),
-            0,
-        );
+        return (frame_bytes(Mode::Raw, block.len(), &raw::encode(block)), 0);
     }
 
     // RAW is the always-available baseline; every other mode must beat its score.
-    let mut best = Best::new(
-        Mode::Raw,
-        raw::encode(block, dtype),
-        lambda,
-        decoded_bytes,
-    );
+    let mut best = Best::new(Mode::Raw, raw::encode(block), lambda, decoded_bytes);
 
     if let Some(p) = const_block::encode(block) {
         best.consider(Mode::Const, p);
@@ -463,7 +475,13 @@ fn encode_block_full(
             best.consider(Mode::Pred2, p);
         }
     }
-    if family == Family::Float && predictors {
+    // The polynomial-float predictors run real float arithmetic on the values.
+    // That is exact and platform-independent for finite inputs, but NaN-payload
+    // propagation and the sign of a default NaN (`inf - inf`) are implementation-
+    // defined, so a block holding any inf/NaN skips them: the residual would
+    // decode differently on another CPU. (DELTA_DP verifies per value anyway;
+    // DELTA2's XOR cannot, hence the block-level gate for both.)
+    if family == Family::Float && predictors && !feats.has_nonfinite {
         let order = linear::select_order(block);
         let lin2_res = linear::encode(block, order);
         if looks_compressible(lin2_res.len(), raw_bytes) {
@@ -501,7 +519,10 @@ fn encode_block_full(
     // since LZ's match-finding is expensive and loses on non-repetitive data.
     let lz_worth = lambda == 0 || feats.distinct_low || feats.looks_like_repeats;
     if entropy && block_compressible && lz_worth {
-        best.consider(Mode::Lz, code_residuals(&lz::encode(block), lambda, allow_lz));
+        best.consider(
+            Mode::Lz,
+            code_residuals(&lz::encode(block), lambda, allow_lz),
+        );
     }
 
     // Byte-plane transpose: helps when a byte position is low-entropy across
@@ -511,7 +532,8 @@ fn encode_block_full(
     if entropy
         && block_compressible
         && (feats.exp_range <= TRANSPOSE_EXP_LIMIT || feats.looks_like_repeats)
-        && let Some(p) = coded_if_competitive(&transpose::encode(block), lambda, allow_lz, best.score)
+        && let Some(p) =
+            coded_if_competitive(&transpose::encode(block), lambda, allow_lz, best.score)
     {
         best.consider(Mode::ByteTranspose, p);
     }
@@ -539,7 +561,7 @@ fn encode_block_full(
     // (`None`) on empty blocks or internal errors, and competes on pure size
     // (λ = 0 at these levels), so it only wins when it is strictly smaller.
     if level.allows_pco()
-        && let Some(p) = pcodec::encode(block, dtype, level.pco_level())
+        && let Some(p) = L::pco_compress(block, dtype, level.pco_level())
     {
         best.consider(Mode::Pco, p);
     }
@@ -610,7 +632,7 @@ const SAMPLE_PLOG2: u8 = 10;
 
 /// Stratified sample: `SAMPLE_RUNS` contiguous runs spread across the block, so
 /// local structure (deltas, repeats) survives within each run.
-fn build_sample(block: &[u64]) -> Vec<u64> {
+fn build_sample<L: Lane>(block: &[L]) -> Vec<L> {
     let n = block.len();
     let total = SAMPLE_RUNS * SAMPLE_RUN_LEN;
     if n <= total {
@@ -647,34 +669,47 @@ fn mode_cascades_lz(mode: Mode) -> bool {
     )
 }
 
-fn encode_mode(
+fn encode_mode<L: Lane>(
     mode: Mode,
-    block: &[u64],
+    block: &[L],
     predictor_log2: u8,
     dtype: DType,
     level: Level,
-    shared: Option<&dict::SharedDict>,
+    shared: Option<&dict::SharedDict<L>>,
 ) -> Option<Vec<u8>> {
     let lambda = level.lambda();
     let allow_lz = level.allows_lz_cascade();
     let entropy = level.allows_entropy();
     match mode {
-        Mode::Raw => Some(raw::encode(block, dtype)),
+        Mode::Raw => Some(raw::encode(block)),
         Mode::Const => const_block::encode(block),
         Mode::Stride => stride::encode(block),
         Mode::Xorz => Some(xorz::encode(block)),
         Mode::Pred => Some(pred::encode(block, predictor_log2)),
-        Mode::PredRc => Some(code_residuals(&pred::encode(block, predictor_log2), lambda, allow_lz)),
+        Mode::PredRc => Some(code_residuals(
+            &pred::encode(block, predictor_log2),
+            lambda,
+            allow_lz,
+        )),
         Mode::Pred2 => Some(code_residuals(
             &pred::dfcm_encode(block, predictor_log2),
             lambda,
             allow_lz,
         )),
-        Mode::Delta2 => Some(code_residuals(&linear::encode(block, linear::select_order(block)), lambda, allow_lz)),
-        Mode::DeltaDp => {
-            linear::dp_encode(block, linear::select_order(block)).map(|r| code_residuals(&r, lambda, allow_lz))
-        }
-        Mode::OrderedDelta => Some(code_residuals(&linear::idelta2_encode(block), lambda, allow_lz)),
+        // The float predictors need every value finite (see `encode_block_full`).
+        Mode::Delta2 | Mode::DeltaDp if has_nonfinite(block) => None,
+        Mode::Delta2 => Some(code_residuals(
+            &linear::encode(block, linear::select_order(block)),
+            lambda,
+            allow_lz,
+        )),
+        Mode::DeltaDp => linear::dp_encode(block, linear::select_order(block))
+            .map(|r| code_residuals(&r, lambda, allow_lz)),
+        Mode::OrderedDelta => Some(code_residuals(
+            &linear::idelta2_encode(block),
+            lambda,
+            allow_lz,
+        )),
         Mode::FloatMult => float_mult::encode(block, entropy, lambda, allow_lz),
         Mode::Lz => Some(code_residuals(&lz::encode(block), lambda, allow_lz)),
         Mode::ByteTranspose => Some(code_residuals(&transpose::encode(block), lambda, allow_lz)),
@@ -687,20 +722,25 @@ fn encode_mode(
         }
         Mode::Rle => rle::encode(block),
         Mode::DeltaBitpack => Some(delta_bitpack::encode(block)),
-        Mode::Pco => pcodec::encode(block, dtype, level.pco_level()),
+        Mode::Pco => L::pco_compress(block, dtype, level.pco_level()),
     }
 }
 
-fn encode_block_sampled(block: &[u64], predictor_log2: u8, dtype: DType, level: Level) -> Vec<u8> {
+/// Whether the block holds any inf/NaN (read as the lane's float).
+fn has_nonfinite<L: Lane>(block: &[L]) -> bool {
+    block.iter().any(|v| v.exponent_field() == L::EXP_ALL_ONES)
+}
+
+fn encode_block_sampled<L: Lane>(
+    block: &[L],
+    predictor_log2: u8,
+    dtype: DType,
+    level: Level,
+) -> Vec<u8> {
     let family = dtype.family();
-    let decoded_bytes = block.len() * dtype.lane_bytes();
+    let decoded_bytes = block.len() * L::BYTES;
     let feats = probe_block_features(block);
-    let mut best = Best::new(
-        Mode::Raw,
-        raw::encode(block, dtype),
-        level.lambda(),
-        decoded_bytes,
-    );
+    let mut best = Best::new(Mode::Raw, raw::encode(block), level.lambda(), decoded_bytes);
 
     let consider_full = |m: Mode, best: &mut Best| {
         if let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, None) {
@@ -763,33 +803,27 @@ fn looks_compressible(residual_bytes: usize, raw_bytes: usize) -> bool {
 /// level, so the whole competition (including the predictor pass) is skipped.
 /// Bounded ranges (FoR), smooth/monotone data (small deltas), and low-cardinality
 /// data (dict/LZ) all fail this test and proceed normally.
-fn looks_incompressible(block: &[u64], feats: &BlockFeatures, lane_bytes: usize) -> bool {
+fn looks_incompressible<L: Lane>(block: &[L], feats: &BlockFeatures) -> bool {
     if feats.distinct_low || feats.looks_like_repeats || block.len() < 256 {
         return false;
     }
     let n = block.len();
-    let lane_bits = (lane_bytes * 8) as u32;
-    let thr = lane_bits.saturating_sub(4);
+    let thr = L::BITS.saturating_sub(4);
     let step = (n / 2048).max(1);
     let mut vmin = block[0];
     let mut vmax = block[0];
-    let mut dmax_zz = 0u64;
+    let mut dmax_zz = L::ZERO;
     let mut i = step.max(1);
     while i < n {
         let v = block[i];
         vmin = vmin.min(v);
         vmax = vmax.max(v);
-        let d = v.wrapping_sub(block[i - 1]);
-        let zz = (d << 1) ^ ((d as i64 >> 63) as u64); // zigzag |delta|
+        let zz = v.wrapping_sub(block[i - 1]).zigzag(); // zigzag |delta|
         dmax_zz = dmax_zz.max(zz);
         i += step;
     }
-    let value_width = 64 - (vmax - vmin).leading_zeros();
-    let delta_width = if dmax_zz == 0 {
-        0
-    } else {
-        64 - dmax_zz.leading_zeros()
-    };
+    let value_width = vmax.wrapping_sub(vmin).bit_width();
+    let delta_width = dmax_zz.bit_width();
     value_width >= thr && delta_width >= thr
 }
 
@@ -807,17 +841,21 @@ const DISTINCT_LOW: u32 = 2048;
 struct BlockFeatures {
     /// Spread of the IEEE-754 exponent field (max − min) across the block.
     exp_range: u32,
+    /// Some value's exponent field is all ones: an inf or NaN (as the lane's
+    /// float). Gates the float-arithmetic predictors.
+    has_nonfinite: bool,
     /// Estimated distinct values (sampled) below [`DISTINCT_LOW`].
     distinct_low: bool,
     /// Most consecutive pairs are equal (run-heavy / RLE-friendly).
     looks_like_repeats: bool,
 }
 
-fn probe_block_features(block: &[u64]) -> BlockFeatures {
+fn probe_block_features<L: Lane>(block: &[L]) -> BlockFeatures {
     let n = block.len();
     if n == 0 {
         return BlockFeatures {
             exp_range: 0,
+            has_nonfinite: false,
             distinct_low: true,
             looks_like_repeats: false,
         };
@@ -828,7 +866,7 @@ fn probe_block_features(block: &[u64]) -> BlockFeatures {
     let mut consec_eq = 0u32;
     let mut prev = block[0];
     for &v in block {
-        let exp = ((v >> 52) & 0x7FF) as u32;
+        let exp = v.exponent_field();
         min_exp = min_exp.min(exp);
         max_exp = max_exp.max(exp);
         consec_eq += u32::from(v == prev);
@@ -842,7 +880,7 @@ fn probe_block_features(block: &[u64]) -> BlockFeatures {
     let stride = (n / 4096).max(1);
     let mut k = 0;
     while k < n {
-        let h = block[k].wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let h = block[k].to_u64().wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let bucket = ((h >> 50) & 0x3FFF) as usize;
         let word = bucket >> 6;
         let bit = 1u64 << (bucket & 63);
@@ -855,6 +893,7 @@ fn probe_block_features(block: &[u64]) -> BlockFeatures {
 
     BlockFeatures {
         exp_range: max_exp - min_exp,
+        has_nonfinite: max_exp == L::EXP_ALL_ONES,
         distinct_low: distinct < DISTINCT_LOW,
         looks_like_repeats: consec_eq.saturating_mul(2) > n as u32,
     }

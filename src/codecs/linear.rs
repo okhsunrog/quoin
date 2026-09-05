@@ -6,55 +6,53 @@
 //! operands share exponent and high-mantissa bits, so the XOR has many leading
 //! zero bits and LEB128 + entropy coding shrink it.
 //!
-//! The float arithmetic is deterministic and reproduced exactly on decode, so
-//! storing `bits(v) ^ bits(pred)` is lossless regardless of rounding — this is
-//! where the FCM/DFCM predictors (which work on raw integers) fall down on
-//! oscillating signals that cross zero.
+//! The arithmetic runs in the lane's own float type (`f32` on a 32-bit lane,
+//! `f64` on a 64-bit one): plain IEEE-754 add/mul, no fused ops, so encode and
+//! decode reproduce the prediction bit-for-bit on every platform — *provided
+//! every input is finite*. NaN-payload propagation and the sign of a default
+//! NaN (`inf - inf`) are implementation-defined, so the encoder skips these
+//! modes for a block containing any inf/NaN (see `encoder.rs`); nothing here
+//! is allowed to depend on such a value.
+//!
+//! This is where the FCM/DFCM predictors (which work on raw integers) fall down
+//! on oscillating signals that cross zero.
 
 use crate::error::Error;
+use crate::lane::{Lane, LaneFloat};
 use crate::varint;
 
-#[inline]
-fn zigzag(n: u64) -> u64 {
-    (n << 1) ^ ((n as i64 >> 63) as u64)
-}
-
-#[inline]
-fn unzigzag(z: u64) -> u64 {
-    (z >> 1) ^ 0u64.wrapping_sub(z & 1)
-}
-
-/// IDELTA2: second-order delta of the raw `u64` bit patterns (subtractive,
+/// IDELTA2: second-order delta of the raw lane bit patterns (subtractive,
 /// wrapping), zigzag + LEB128. For monotone-ish data (ramps, `0.5*i*i`) the
 /// integer second difference is constant within each exponent band and spikes
 /// only at band boundaries — far more compressible than the float-XOR variant.
-pub(crate) fn idelta2_encode(vals: &[u64]) -> Vec<u8> {
+pub(crate) fn idelta2_encode<L: Lane>(vals: &[L]) -> Vec<u8> {
     let mut out = Vec::with_capacity(vals.len());
-    let (mut p1, mut p2) = (0u64, 0u64);
+    let (mut p1, mut p2) = (L::ZERO, L::ZERO);
     for (i, &v) in vals.iter().enumerate() {
         let pred = match i {
-            0 => 0,
+            0 => L::ZERO,
             1 => p1,
-            _ => p1.wrapping_mul(2).wrapping_sub(p2),
+            _ => p1.wrapping_add(p1).wrapping_sub(p2),
         };
-        varint::write_u64(&mut out, zigzag(v.wrapping_sub(pred)));
+        varint::write_u64(&mut out, v.wrapping_sub(pred).zigzag().to_u64());
         p2 = p1;
         p1 = v;
     }
     out
 }
 
-pub(crate) fn idelta2_decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn idelta2_decode<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
     let mut out = Vec::with_capacity(n);
-    let (mut p1, mut p2) = (0u64, 0u64);
+    let (mut p1, mut p2) = (L::ZERO, L::ZERO);
     let mut pos = 0usize;
     for i in 0..n {
         let pred = match i {
-            0 => 0,
+            0 => L::ZERO,
             1 => p1,
-            _ => p1.wrapping_mul(2).wrapping_sub(p2),
+            _ => p1.wrapping_add(p1).wrapping_sub(p2),
         };
-        let v = pred.wrapping_add(unzigzag(varint::read_u64(payload, &mut pos)?));
+        let z = L::try_from_u64(varint::read_u64(payload, &mut pos)?)?;
+        let v = pred.wrapping_add(z.unzigzag());
         out.push(v);
         p2 = p1;
         p1 = v;
@@ -80,21 +78,21 @@ const MAX_ORDER: usize = 4;
 /// order`) the effective order drops to what's available, so encode and decode
 /// stay in lock-step.
 #[inline]
-fn predict_f64(h: &[f64; MAX_ORDER], avail: usize, order: usize) -> f64 {
+fn predict<F: LaneFloat>(h: &[F; MAX_ORDER], avail: usize, order: usize) -> F {
     let eff = order.min(avail);
     if eff == 0 {
-        return 0.0;
+        return F::ZERO;
     }
     let c = COEFFS[eff];
-    let mut pred = 0.0f64;
+    let mut pred = F::ZERO;
     for (k, &coef) in c.iter().enumerate() {
-        pred += f64::from(coef) * h[k];
+        pred = pred + F::from_i32(coef) * h[k];
     }
     pred
 }
 
 #[inline]
-fn push_hist(h: &mut [f64; MAX_ORDER], v: f64) {
+fn push_hist<F: LaneFloat>(h: &mut [F; MAX_ORDER], v: F) {
     h[3] = h[2];
     h[2] = h[1];
     h[1] = h[0];
@@ -121,15 +119,20 @@ fn mean_abs(d: &[f64]) -> f64 {
 /// Choose the predictor order (1..=`MAX_ORDER`) whose residual — the order-th
 /// finite difference — is smallest on a contiguous sample. Smooth data drives
 /// this up (higher differences shrink); noisy/random data keeps it low (they
-/// grow), so the higher orders never get a chance to amplify noise.
-pub(crate) fn select_order(vals: &[u64]) -> usize {
+/// grow), so the higher orders never get a chance to amplify noise. An
+/// encode-side heuristic only (the order is stored), so it evaluates in `f64`
+/// for either lane.
+pub(crate) fn select_order<L: Lane>(vals: &[L]) -> usize {
     let n = vals.len();
     if n < 8 {
         return 2;
     }
     let win = 1024.min(n);
     let start = (n - win) / 2; // skip the warm-up edge
-    let mut d: Vec<f64> = vals[start..start + win].iter().map(|&b| f64::from_bits(b)).collect();
+    let mut d: Vec<f64> = vals[start..start + win]
+        .iter()
+        .map(|&b| b.to_float().to_f64())
+        .collect();
     let (mut best_order, mut best_mag) = (1usize, f64::INFINITY);
     for order in 1..=MAX_ORDER {
         diff_in_place(&mut d);
@@ -146,32 +149,32 @@ pub(crate) fn select_order(vals: &[u64]) -> usize {
 /// the previous values and XOR the actual bit pattern with the prediction's. The
 /// float arithmetic is deterministic and reproduced on decode, so this is
 /// lossless regardless of rounding. The payload is `[order] ++ xor-residuals`.
-pub(crate) fn encode(vals: &[u64], order: usize) -> Vec<u8> {
+pub(crate) fn encode<L: Lane>(vals: &[L], order: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(vals.len() + 1);
     out.push(order as u8);
-    let mut h = [0.0f64; MAX_ORDER];
+    let mut h = [L::Float::ZERO; MAX_ORDER];
     for (i, &bits) in vals.iter().enumerate() {
-        let pred = predict_f64(&h, i.min(MAX_ORDER), order).to_bits();
-        varint::write_u64(&mut out, bits ^ pred);
-        push_hist(&mut h, f64::from_bits(bits));
+        let pred = predict(&h, i.min(MAX_ORDER), order).to_bits();
+        varint::write_u64(&mut out, (bits ^ pred).to_u64());
+        push_hist(&mut h, bits.to_float());
     }
     out
 }
 
-pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn decode<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
     let (&order_b, rest) = payload.split_first().ok_or(Error::Truncated)?;
     let order = order_b as usize;
     if !(1..=MAX_ORDER).contains(&order) {
         return Err(Error::CorruptPayload("delta2 order"));
     }
     let mut out = Vec::with_capacity(n);
-    let mut h = [0.0f64; MAX_ORDER];
+    let mut h = [L::Float::ZERO; MAX_ORDER];
     let mut pos = 0usize;
     for i in 0..n {
-        let pred = predict_f64(&h, i.min(MAX_ORDER), order).to_bits();
-        let bits = varint::read_u64(rest, &mut pos)? ^ pred;
+        let pred = predict(&h, i.min(MAX_ORDER), order).to_bits();
+        let bits = L::try_from_u64(varint::read_u64(rest, &mut pos)?)? ^ pred;
         out.push(bits);
-        push_hist(&mut h, f64::from_bits(bits));
+        push_hist(&mut h, bits.to_float());
     }
     if pos != rest.len() {
         return Err(Error::CorruptPayload("delta2 trailing bytes"));
@@ -188,43 +191,43 @@ pub(crate) fn decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
 /// encoder **verifies** `pred + r == v` bit-for-bit and returns `None` if any
 /// value fails (another mode then wins). The decoder can therefore trust that
 /// reconstruction is exact. Payload is `[order] ++ residuals`.
-pub(crate) fn dp_encode(vals: &[u64], order: usize) -> Option<Vec<u8>> {
+pub(crate) fn dp_encode<L: Lane>(vals: &[L], order: usize) -> Option<Vec<u8>> {
     if vals.is_empty() {
         return None;
     }
     let mut out = Vec::with_capacity(vals.len() + 1);
     out.push(order as u8);
-    let mut h = [0.0f64; MAX_ORDER];
-    let mut prev_rbits = 0u64;
+    let mut h = [L::Float::ZERO; MAX_ORDER];
+    let mut prev_rbits = L::ZERO;
     for (i, &bits) in vals.iter().enumerate() {
-        let v = f64::from_bits(bits);
-        let pred = predict_f64(&h, i.min(MAX_ORDER), order);
+        let v = bits.to_float();
+        let pred = predict(&h, i.min(MAX_ORDER), order);
         let r = v - pred;
         if (pred + r).to_bits() != bits {
             return None; // not exactly invertible for this block
         }
         let rbits = r.to_bits();
-        varint::write_u64(&mut out, rbits ^ prev_rbits);
+        varint::write_u64(&mut out, (rbits ^ prev_rbits).to_u64());
         prev_rbits = rbits;
         push_hist(&mut h, v);
     }
     Some(out)
 }
 
-pub(crate) fn dp_decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+pub(crate) fn dp_decode<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
     let (&order_b, rest) = payload.split_first().ok_or(Error::Truncated)?;
     let order = order_b as usize;
     if !(1..=MAX_ORDER).contains(&order) {
         return Err(Error::CorruptPayload("delta_dp order"));
     }
     let mut out = Vec::with_capacity(n);
-    let mut h = [0.0f64; MAX_ORDER];
-    let mut prev_rbits = 0u64;
+    let mut h = [L::Float::ZERO; MAX_ORDER];
+    let mut prev_rbits = L::ZERO;
     let mut pos = 0usize;
     for i in 0..n {
-        let pred = predict_f64(&h, i.min(MAX_ORDER), order);
-        let rbits = varint::read_u64(rest, &mut pos)? ^ prev_rbits;
-        let v = pred + f64::from_bits(rbits);
+        let pred = predict(&h, i.min(MAX_ORDER), order);
+        let rbits = L::try_from_u64(varint::read_u64(rest, &mut pos)?)? ^ prev_rbits;
+        let v = pred + rbits.to_float();
         out.push(v.to_bits());
         prev_rbits = rbits;
         push_hist(&mut h, v);
@@ -240,20 +243,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zigzag_roundtrips_including_negatives() {
-        for &v in &[0u64, 1, 2, u64::MAX, u64::MAX - 1, 1u64 << 63, 12345] {
-            assert_eq!(unzigzag(zigzag(v)), v);
-        }
-    }
-
-    #[test]
     fn idelta2_roundtrips() {
         // Includes a monotone ramp and a wrap-around to exercise signed deltas.
         let vals: Vec<u64> = (0..1000u64)
             .map(|i| i.wrapping_mul(3).wrapping_sub(7))
             .collect();
         let enc = idelta2_encode(&vals);
-        assert_eq!(idelta2_decode(&enc, vals.len()).unwrap(), vals);
+        assert_eq!(idelta2_decode::<u64>(&enc, vals.len()).unwrap(), vals);
+        let vals32: Vec<u32> = (0..1000u32)
+            .map(|i| i.wrapping_mul(3).wrapping_sub(7))
+            .collect();
+        let enc = idelta2_encode(&vals32);
+        assert!(
+            enc.len() <= vals32.len() + 8,
+            "constant 2nd difference → 1 byte/value"
+        );
+        assert_eq!(idelta2_decode::<u32>(&enc, vals32.len()).unwrap(), vals32);
     }
 
     #[test]
@@ -261,9 +266,61 @@ mod tests {
         let vals: Vec<u64> = (0..1000).map(|i| ((i as f64) * 0.5).to_bits()).collect();
         for order in 1..=MAX_ORDER {
             let enc = encode(&vals, order);
-            assert_eq!(decode(&enc, vals.len()).unwrap(), vals, "xor order {order}");
+            assert_eq!(
+                decode::<u64>(&enc, vals.len()).unwrap(),
+                vals,
+                "xor order {order}"
+            );
             if let Some(dp) = dp_encode(&vals, order) {
-                assert_eq!(dp_decode(&dp, vals.len()).unwrap(), vals, "dp order {order}");
+                assert_eq!(
+                    dp_decode::<u64>(&dp, vals.len()).unwrap(),
+                    vals,
+                    "dp order {order}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f32_lane_predicts_in_f32() {
+        // A parabola in f32: the 2nd difference is exactly 1.0 → DELTA_DP is
+        // exact and tiny; DELTA2 XOR residuals are small.
+        let vals: Vec<u32> = (0..2000)
+            .map(|i| ((i * i) as f32 * 0.5).to_bits())
+            .collect();
+        for order in 1..=MAX_ORDER {
+            let enc = encode(&vals, order);
+            assert_eq!(
+                decode::<u32>(&enc, vals.len()).unwrap(),
+                vals,
+                "xor order {order}"
+            );
+            if let Some(dp) = dp_encode(&vals, order) {
+                assert_eq!(
+                    dp_decode::<u32>(&dp, vals.len()).unwrap(),
+                    vals,
+                    "dp order {order}"
+                );
+                if order == 3 {
+                    assert!(
+                        dp.len() < vals.len() + 16,
+                        "exact cubic residuals are ~1 byte"
+                    );
+                }
+            }
+        }
+        // Signed zero and subnormals are ordinary finite values: bit-exact.
+        let edge: Vec<u32> = [0.0f32, -0.0, f32::from_bits(1), -1.5, 3e-39, 1e30, -1e-30]
+            .iter()
+            .map(|f| f.to_bits())
+            .collect();
+        for order in 1..=MAX_ORDER {
+            assert_eq!(
+                decode::<u32>(&encode(&edge, order), edge.len()).unwrap(),
+                edge
+            );
+            if let Some(dp) = dp_encode(&edge, order) {
+                assert_eq!(dp_decode::<u32>(&dp, edge.len()).unwrap(), edge);
             }
         }
     }
@@ -274,7 +331,17 @@ mod tests {
         let smooth: Vec<u64> = (0..2000)
             .map(|i| ((i as f64 * 0.002).sin() * 100.0 + i as f64 * 0.01).to_bits())
             .collect();
-        assert!(select_order(&smooth) >= 3, "smooth signal should pick a high order");
+        assert!(
+            select_order(&smooth) >= 3,
+            "smooth signal should pick a high order"
+        );
+        let smooth32: Vec<u32> = (0..2000)
+            .map(|i| ((i as f32 * 0.002).sin() * 100.0 + i as f32 * 0.01).to_bits())
+            .collect();
+        assert!(
+            select_order(&smooth32) >= 2,
+            "smooth f32 signal picks a high order"
+        );
         // Random bit patterns: differences explode → back off to a low order.
         let mut s = 1u64;
         let noise: Vec<u64> = (0..2000)
@@ -283,6 +350,9 @@ mod tests {
                 f64::from_bits(s >> 2).to_bits()
             })
             .collect();
-        assert!(select_order(&noise) <= 2, "noise should not pick a high order");
+        assert!(
+            select_order(&noise) <= 2,
+            "noise should not pick a high order"
+        );
     }
 }

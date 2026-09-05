@@ -139,22 +139,27 @@ pub(crate) fn decode(blob: &[u8], n: usize) -> Result<Vec<u8>, Error> {
 }
 
 /// Keep only the lane words at valid positions (compaction for the value codec).
-pub(crate) fn compact(lane: &[u64], bitmap: &[u8]) -> Vec<u64> {
+pub(crate) fn compact<L: Copy>(lane: &[L], bitmap: &[u8]) -> Vec<L> {
     (0..lane.len())
         .filter(|&i| is_set(bitmap, i))
         .map(|i| lane[i])
         .collect()
 }
 
-/// Scatter `valid` back into `n` positions per `bitmap`; null slots become 0.
-pub(crate) fn scatter(valid: &[u64], bitmap: &[u8], n: usize) -> Result<Vec<u64>, Error> {
+/// Scatter `valid` back into `n` positions per `bitmap`; null slots become the
+/// lane's zero word.
+pub(crate) fn scatter<L: Copy + Default>(
+    valid: &[L],
+    bitmap: &[u8],
+    n: usize,
+) -> Result<Vec<L>, Error> {
     if count_valid(bitmap, n) != valid.len() {
         return Err(Error::CorruptPayload("validity/value count mismatch"));
     }
     let mut out = Vec::new();
     out.try_reserve_exact(n)
         .map_err(|_| Error::CorruptPayload("decoded column too large"))?;
-    out.resize(n, 0);
+    out.resize(n, L::default());
     let mut j = 0usize;
     for (i, slot) in out.iter_mut().enumerate() {
         if is_set(bitmap, i) {
@@ -220,5 +225,9 @@ mod tests {
         assert_eq!(c, vec![10, 30, 50]);
         let s = scatter(&c, &bm, 5).unwrap();
         assert_eq!(s, vec![10, 0, 30, 0, 50]); // null slots -> 0
+        let lane32 = vec![10u32, 20, 30, 40, 50];
+        let c32 = compact(&lane32, &bm);
+        assert_eq!(c32, vec![10, 30, 50]);
+        assert_eq!(scatter(&c32, &bm, 5).unwrap(), vec![10, 0, 30, 0, 50]);
     }
 }

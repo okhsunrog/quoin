@@ -1,49 +1,38 @@
 //! RAW: verbatim little-endian lane words. The always-available fallback.
 //!
-//! Width is the column's element size (4 or 8): a narrow column emits only its
-//! low bytes so the baseline isn't doubled by the internal `u64` lane. `F32` is
-//! special — its lane holds a *widened `f64`* (8 meaningful bytes), so RAW can't
-//! just truncate; it narrows each value back to `f32` (exact, since the lane came
-//! from one) and emits the compact 4-byte form.
+//! Width is the lane's element size (4 or 8 bytes): a 32-bit column is stored
+//! at 4 B/value because its lane *is* 32-bit — nothing is widened.
 
-use crate::dtype::DType;
 use crate::error::Error;
+use crate::lane::Lane;
 
-pub(crate) fn encode(vals: &[u64], dtype: DType) -> Vec<u8> {
-    if dtype == DType::F32 {
-        let mut out = Vec::with_capacity(vals.len() * 4);
-        for &v in vals {
-            let narrowed = (f64::from_bits(v) as f32).to_bits();
-            out.extend_from_slice(&narrowed.to_le_bytes());
-        }
-        return out;
-    }
-    let lane_bytes = dtype.lane_bytes();
-    let mut out = Vec::with_capacity(vals.len() * lane_bytes);
-    for &v in vals {
-        out.extend_from_slice(&v.to_le_bytes()[..lane_bytes]);
-    }
-    out
+pub(crate) fn encode<L: Lane>(vals: &[L]) -> Vec<u8> {
+    L::le_bytes(vals).into_owned()
 }
 
-pub(crate) fn decode(payload: &[u8], n: usize, dtype: DType) -> Result<Vec<u64>, Error> {
-    let lane_bytes = dtype.lane_bytes();
-    if payload.len() != n * lane_bytes {
+pub(crate) fn decode<L: Lane>(payload: &[u8], n: usize) -> Result<Vec<L>, Error> {
+    if payload.len() != n * L::BYTES {
         return Err(Error::CorruptPayload("raw payload length"));
     }
-    if dtype == DType::F32 {
-        let mut out = Vec::with_capacity(n);
-        for chunk in payload.chunks_exact(4) {
-            let bits = u32::from_le_bytes(chunk.try_into().unwrap());
-            out.push((f32::from_bits(bits) as f64).to_bits());
-        }
-        return Ok(out);
+    Ok(L::from_le_bytes(payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_widths() {
+        let v64 = [1u64, u64::MAX, 0x0102_0304_0506_0708];
+        let e = encode(&v64);
+        assert_eq!(e.len(), 24);
+        assert_eq!(&e[16..24], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(decode::<u64>(&e, 3).unwrap(), v64);
+        let v32 = [1u32, u32::MAX, 0x0102_0304];
+        let e = encode(&v32);
+        assert_eq!(e.len(), 12);
+        assert_eq!(&e[8..12], &0x0102_0304u32.to_le_bytes());
+        assert_eq!(decode::<u32>(&e, 3).unwrap(), v32);
+        assert!(decode::<u32>(&e, 2).is_err());
     }
-    let mut out = Vec::with_capacity(n);
-    for chunk in payload.chunks_exact(lane_bytes) {
-        let mut word = [0u8; 8];
-        word[..lane_bytes].copy_from_slice(chunk);
-        out.push(u64::from_le_bytes(word));
-    }
-    Ok(out)
 }

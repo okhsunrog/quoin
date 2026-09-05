@@ -1,4 +1,5 @@
-//! LZ: byte-level LZ77 over the block's little-endian bytes. Targets the
+//! LZ: byte-level LZ77 over the block's little-endian lane bytes (4 or 8 per
+//! value). Targets the
 //! repeating-value datasets (dictionaries, quantized levels, cent-rounded
 //! prices) where the predictors find little but whole values or byte runs
 //! recur. The token stream is entropy-coded by the caller (LZ + range/rANS,
@@ -9,6 +10,7 @@
 //! Decode tolerates overlapping copies (offset < length).
 
 use crate::error::Error;
+use crate::lane::Lane;
 use crate::varint;
 
 const MIN_MATCH: usize = 4;
@@ -153,21 +155,13 @@ pub(crate) fn lz_decompress(stream: &[u8], expected: usize) -> Result<Vec<u8>, E
     Ok(out)
 }
 
-pub(crate) fn encode(vals: &[u64]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vals.len() * 8);
-    for &v in vals {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    lz_compress(&bytes)
+pub(crate) fn encode<L: Lane>(vals: &[L]) -> Vec<u8> {
+    lz_compress(&L::le_bytes(vals))
 }
 
-pub(crate) fn decode(stream: &[u8], n_values: usize) -> Result<Vec<u64>, Error> {
-    let bytes = lz_decompress(stream, n_values * 8)?;
-    let mut out = Vec::with_capacity(n_values);
-    for chunk in bytes.chunks_exact(8) {
-        out.push(u64::from_le_bytes(chunk.try_into().unwrap()));
-    }
-    Ok(out)
+pub(crate) fn decode<L: Lane>(stream: &[u8], n_values: usize) -> Result<Vec<L>, Error> {
+    let bytes = lz_decompress(stream, n_values * L::BYTES)?;
+    Ok(L::from_le_bytes(&bytes))
 }
 
 #[cfg(test)]
@@ -186,7 +180,14 @@ mod tests {
             enc.len() < vals.len() * 8 / 4,
             "repetitive data should shrink a lot"
         );
-        assert_eq!(decode(&enc, vals.len()).unwrap(), vals);
+        assert_eq!(decode::<u64>(&enc, vals.len()).unwrap(), vals);
+        // Same dictionary as f32: half the bytes, same repeats.
+        let vals32: Vec<u32> = (0..50_000u32)
+            .map(|i| ((i & 15) as f32).to_bits())
+            .collect();
+        let enc32 = encode(&vals32);
+        assert!(enc32.len() < vals32.len());
+        assert_eq!(decode::<u32>(&enc32, vals32.len()).unwrap(), vals32);
     }
 
     #[test]
@@ -198,8 +199,12 @@ mod tests {
                 s
             })
             .collect();
-        assert_eq!(decode(&encode(&vals), vals.len()).unwrap(), vals);
-        assert_eq!(decode(&encode(&[]), 0).unwrap(), Vec::<u64>::new());
-        assert_eq!(decode(&encode(&[42]), 1).unwrap(), vec![42]);
+        assert_eq!(decode::<u64>(&encode(&vals), vals.len()).unwrap(), vals);
+        assert_eq!(
+            decode::<u64>(&encode::<u64>(&[]), 0).unwrap(),
+            Vec::<u64>::new()
+        );
+        assert_eq!(decode::<u64>(&encode(&[42u64]), 1).unwrap(), vec![42]);
+        assert_eq!(decode::<u32>(&encode(&[42u32]), 1).unwrap(), vec![42]);
     }
 }

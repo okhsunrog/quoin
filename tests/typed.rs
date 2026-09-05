@@ -265,8 +265,14 @@ fn levels_trade_ratio_for_speed_and_roundtrip() {
     // dict/RLE), so on this float column it must not out-compress Fast — and the
     // two must no longer be identical (the bug this guards against).
     let fast = sizes[1].1;
-    assert!(fastest >= fast, "Fastest ({fastest}) ≥ Fast ({fast}) in pool");
-    assert!(fastest > fast, "Fastest and Fast must differ (distinct levels)");
+    assert!(
+        fastest >= fast,
+        "Fastest ({fastest}) ≥ Fast ({fast}) in pool"
+    );
+    assert!(
+        fastest > fast,
+        "Fastest and Fast must differ (distinct levels)"
+    );
 }
 
 #[test]
@@ -431,7 +437,10 @@ fn configurable_block_size_roundtrips_and_changes_layout() {
     )
     .len();
     let adaptive = compress_column(ColumnRef::I64(&vals), None, Config::default()).len();
-    assert!(small >= adaptive, "tiny blocks cost some ratio: {small} vs {adaptive}");
+    assert!(
+        small >= adaptive,
+        "tiny blocks cost some ratio: {small} vs {adaptive}"
+    );
     assert!(small < raw && adaptive < raw);
 
     // block_size: None is the adaptive default and is byte-identical to omitting it.
@@ -455,10 +464,11 @@ fn f64_decompress_rejects_other_types() {
 #[test]
 fn f32_roundtrip_and_dtype() {
     // Decimal-ish f32 column (ALP / FLOAT_MULT territory), plus exotic bit
-    // patterns: every finite value, infinity, signed zero and subnormal must be
-    // bit-exact; NaN inputs must come back as NaN (payload not guaranteed — see
-    // `DType::F32`).
-    let mut vals: Vec<f32> = (0..4096).map(|i| 100.0 + (i % 700) as f32 / 100.0).collect();
+    // patterns: every value — finite, infinity, signed zero, subnormal and NaN
+    // with any payload — must be bit-exact (see `DType::F32`).
+    let mut vals: Vec<f32> = (0..4096)
+        .map(|i| 100.0 + (i % 700) as f32 / 100.0)
+        .collect();
     let finite_len = vals.len();
     vals.push(f32::from_bits(0x0000_0001)); // smallest subnormal
     vals.push(-0.0);
@@ -469,7 +479,14 @@ fn f32_roundtrip_and_dtype() {
     vals.push(f32::from_bits(0x7F80_0001)); // signaling NaN
     vals.push(f32::from_bits(0xFFAB_CDEF)); // negative NaN w/ payload
 
-    for cfg in [cfg_full(), cfg_sample(), Config { level: Level::Fast, ..cfg_full() }] {
+    for cfg in [
+        cfg_full(),
+        cfg_sample(),
+        Config {
+            level: Level::Fast,
+            ..cfg_full()
+        },
+    ] {
         let packed = compress_column(ColumnRef::F32(&vals), None, cfg);
         let dec = decompress_column(&packed).unwrap();
         assert_eq!(dec.values.dtype(), DType::F32);
@@ -477,15 +494,11 @@ fn f32_roundtrip_and_dtype() {
             Column::F32(got) => {
                 assert_eq!(got.len(), vals.len());
                 for (i, (a, b)) in got.iter().zip(&vals).enumerate() {
-                    if i >= nan_idx {
-                        // NaN value preserved; payload bits are not guaranteed.
-                        assert!(a.is_nan(), "f32 NaN value preserved");
-                    } else {
-                        // Everything non-NaN is bit-exact, including ±0 / inf / subnormal.
-                        assert_eq!(a.to_bits(), b.to_bits(), "f32 bit-exact at idx {i}");
-                    }
+                    // Everything is bit-exact — ±0 / inf / subnormal, and (since
+                    // the native 32-bit lane) NaN payloads and signaling bits too.
+                    assert_eq!(a.to_bits(), b.to_bits(), "f32 bit-exact at idx {i}");
                 }
-                let _ = finite_len;
+                let _ = (finite_len, nan_idx);
             }
             other => panic!("expected F32, got {:?}", other.dtype()),
         }
@@ -494,7 +507,10 @@ fn f32_roundtrip_and_dtype() {
     // A smooth decimal f32 column should beat its raw 4-byte size.
     let smooth: Vec<f32> = (0..8192).map(|i| (i as f32) * 0.01 + 5.0).collect();
     let packed = compress_column(ColumnRef::F32(&smooth), None, cfg_full());
-    assert!(packed.len() < smooth.len() * 4, "f32 column should compress");
+    assert!(
+        packed.len() < smooth.len() * 4,
+        "f32 column should compress"
+    );
 }
 
 #[test]
@@ -521,5 +537,402 @@ fn f32_incompressible_does_not_expand_much() {
         other => panic!("expected F32, got {:?}", other.dtype()),
     }
     // Allow modest framing overhead, but nowhere near the 8-byte widened lane.
-    assert!(packed.len() < vals.len() * 5, "incompressible f32 must not double");
+    assert!(
+        packed.len() < vals.len() * 5,
+        "incompressible f32 must not double"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Native 32-bit lanes (format v3): f32 / i32 / u32 are compressed at their own
+// width. These tests pin the bit-exactness contract and the wire behaviour.
+// ---------------------------------------------------------------------------
+
+fn lcg(s: &mut u64) -> u64 {
+    *s = s
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *s
+}
+
+fn all_configs() -> Vec<Config> {
+    let mut v = Vec::new();
+    for level in [
+        Level::Fastest,
+        Level::Fast,
+        Level::Balanced,
+        Level::High,
+        Level::Max,
+    ] {
+        for selection in [Selection::Full, Selection::Sample] {
+            v.push(Config {
+                level,
+                selection,
+                ..Config::default()
+            });
+        }
+    }
+    v
+}
+
+fn roundtrip_f32_bits(vals: &[f32], cfg: Config, what: &str) -> usize {
+    let packed = compress_column(ColumnRef::F32(vals), None, cfg);
+    assert_eq!(packed[4], 3, "{what}: native 32-bit streams are format v3");
+    let dec = decompress_column(&packed).unwrap();
+    assert_eq!(dec.validity, None);
+    match dec.values {
+        Column::F32(got) => {
+            assert_eq!(got.len(), vals.len(), "{what}: length");
+            for (i, (a, b)) in got.iter().zip(vals).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "{what} @ {cfg:?}: bit-exact at index {i} ({:#010x} vs {:#010x})",
+                    a.to_bits(),
+                    b.to_bits()
+                );
+            }
+        }
+        other => panic!("expected F32, got {:?}", other.dtype()),
+    }
+    packed.len()
+}
+
+/// Every IEEE-754 binary32 class, including signaling NaNs and NaN payloads —
+/// the previous widened-f64 design could quiet these; the native lane cannot.
+fn f32_edge_patterns() -> Vec<f32> {
+    [
+        0x0000_0000u32, // +0
+        0x8000_0000,    // -0
+        0x0000_0001,    // smallest subnormal
+        0x807F_FFFF,    // largest negative subnormal
+        0x0080_0000,    // smallest normal
+        0x7F7F_FFFF,    // f32::MAX
+        0xFF7F_FFFF,    // f32::MIN
+        0x7F80_0000,    // +inf
+        0xFF80_0000,    // -inf
+        0x7FC0_0000,    // canonical quiet NaN
+        0xFFC0_0000,    // negative quiet NaN
+        0x7F80_0001,    // signaling NaN, minimal payload
+        0xFF80_0001,    // negative signaling NaN
+        0x7FBF_FFFF,    // signaling NaN, full payload
+        0x7FC0_1234,    // quiet NaN with payload
+        0xFFAB_CDEF,    // negative NaN with payload
+        0x3F80_0000,    // 1.0
+        0xBF80_0000,    // -1.0
+        0x3DCC_CCCD,    // 0.1f32
+        0x4049_0FDB,    // pi
+    ]
+    .into_iter()
+    .map(f32::from_bits)
+    .collect()
+}
+
+#[test]
+fn f32_every_bit_pattern_class_is_exact_at_every_level() {
+    let edges = f32_edge_patterns();
+    // The edge set alone, the edge set repeated (dict/RLE/LZ territory), and the
+    // edge set spliced into smooth decimal data (ALP/FLOAT_MULT/predictors with
+    // exceptions and the non-finite gate).
+    let repeated: Vec<f32> = (0..4000).map(|i| edges[i % edges.len()]).collect();
+    let mut spliced: Vec<f32> = (0..6000)
+        .map(|i| 100.0 + (i % 700) as f32 / 100.0)
+        .collect();
+    for (k, &e) in edges.iter().enumerate() {
+        spliced[k * 250 + 7] = e;
+    }
+    let mut smooth_with_nan: Vec<f32> =
+        (0..5000).map(|i| (i as f32 * 0.01).sin() * 100.0).collect();
+    smooth_with_nan[2500] = f32::from_bits(0x7F80_0001);
+    smooth_with_nan[4000] = f32::NEG_INFINITY;
+    for cfg in all_configs() {
+        roundtrip_f32_bits(&edges, cfg, "edges");
+        roundtrip_f32_bits(&repeated, cfg, "repeated edges");
+        roundtrip_f32_bits(&spliced, cfg, "spliced edges");
+        roundtrip_f32_bits(&smooth_with_nan, cfg, "smooth with sNaN/inf");
+    }
+}
+
+#[test]
+fn f32_random_bit_patterns_roundtrip_at_every_level() {
+    // Deterministic random 32-bit patterns: ~1/256 are NaN/inf, the rest span
+    // every exponent — RAW territory, but every codec must at least be exact.
+    let mut s = 0xF32F_32F3u64;
+    let noise: Vec<f32> = (0..20_000)
+        .map(|_| f32::from_bits((lcg(&mut s) >> 32) as u32))
+        .collect();
+    for cfg in all_configs() {
+        let size = roundtrip_f32_bits(&noise, cfg, "random bits");
+        assert!(
+            size < noise.len() * 4 + 512,
+            "noise must stay near 4 B/value: {size}"
+        );
+    }
+}
+
+#[test]
+fn f32_shapes_and_multiblock() {
+    // Several full blocks (the 32-bit lane packs 256 Ki values per 1 MiB block)
+    // plus a short tail, across shapes that pick different modes.
+    let n = 600_000;
+    let mut s = 7u64;
+    let shapes: Vec<(&str, Vec<f32>)> = vec![
+        ("const", vec![2.5f32; n]),
+        ("stride-like ramp", (0..n).map(|i| i as f32).collect()),
+        (
+            "decimal sensor",
+            (0..n).map(|i| 1234.5 + ((i % 5000) as f32) * 0.1).collect(),
+        ),
+        (
+            "smooth",
+            (0..n).map(|i| (i as f32 * 0.001).sin() * 2000.0).collect(),
+        ),
+        (
+            "low-card",
+            (0..n).map(|_| (lcg(&mut s) >> 60) as f32 * 0.125).collect(),
+        ),
+        ("runs", (0..n).map(|i| (i / 300) as f32 * 0.5).collect()),
+    ];
+    for (what, vals) in &shapes {
+        for level in [Level::Fastest, Level::Balanced, Level::Max] {
+            let cfg = Config {
+                level,
+                ..Config::default()
+            };
+            let size = roundtrip_f32_bits(vals, cfg, what);
+            // `Fastest` has no dictionary codec, so scattered low-cardinality
+            // floats (wide bit-pattern range) legitimately stay at raw there.
+            if !(*what == "low-card" && level == Level::Fastest) {
+                assert!(
+                    size < vals.len() * 4,
+                    "{what} @ {level:?} must beat raw: {size}"
+                );
+            }
+        }
+        // Sampled selection and a small fixed block size.
+        roundtrip_f32_bits(
+            vals,
+            Config {
+                selection: Selection::Sample,
+                ..Config::default()
+            },
+            what,
+        );
+        roundtrip_f32_bits(
+            &vals[..50_000],
+            Config {
+                block_size: Some(777),
+                level: Level::Fast,
+                ..Config::default()
+            },
+            what,
+        );
+    }
+    // Empty, single, and a block-boundary-straddling length.
+    for cfg in all_configs() {
+        roundtrip_f32_bits(&[], cfg, "empty");
+        roundtrip_f32_bits(&[-0.0], cfg, "single");
+        roundtrip_f32_bits(&[f32::from_bits(0x7F80_0001)], cfg, "single sNaN");
+    }
+    let straddle: Vec<f32> = (0..(256 * 1024 + 3))
+        .map(|i| (i % 97) as f32 * 0.25)
+        .collect();
+    roundtrip_f32_bits(&straddle, Config::default(), "block straddle");
+}
+
+#[test]
+fn f32_nullable_roundtrip_is_exact() {
+    let n = 9_001usize;
+    let mut s = 3u64;
+    let valid: Vec<bool> = (0..n)
+        .map(|i| {
+            s = lcg(&mut s);
+            !(4000..4300).contains(&i) && s & 3 != 0
+        })
+        .collect();
+    let bm = bitmap_from_bools(&valid);
+    let edges = f32_edge_patterns();
+    let vals: Vec<f32> = (0..n)
+        .map(|i| {
+            if i % 500 == 0 {
+                edges[(i / 500) % edges.len()]
+            } else {
+                i as f32 * 0.01
+            }
+        })
+        .collect();
+    for cfg in all_configs() {
+        let packed = compress_column(ColumnRef::F32(&vals), Some(&bm), cfg);
+        let dec = decompress_column(&packed).unwrap();
+        assert_eq!(dec.validity.as_deref(), Some(&bm[..]));
+        match dec.values {
+            Column::F32(got) => {
+                for i in 0..n {
+                    let want = if valid[i] { vals[i].to_bits() } else { 0 };
+                    assert_eq!(got[i].to_bits(), want, "{cfg:?} slot {i}");
+                }
+            }
+            _ => panic!(),
+        }
+    }
+    // All-null and all-valid edges.
+    let allnull = bitmap_from_bools(&vec![false; 100]);
+    let dec = decompress_column(&compress_column(
+        ColumnRef::F32(&[f32::NAN; 100]),
+        Some(&allnull),
+        Config::default(),
+    ))
+    .unwrap();
+    assert_eq!(dec.validity.as_deref(), Some(&allnull[..]));
+    match dec.values {
+        Column::F32(got) => assert!(got.iter().all(|v| v.to_bits() == 0)),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn f32_is_not_a_widened_f64_stream() {
+    // A constant f32 block must be a 4-byte CONST payload, not an 8-byte f64.
+    let packed = compress_column(ColumnRef::F32(&[1.5f32; 1000]), None, Config::default());
+    // header(16) + frame header(9) + 4-byte payload.
+    assert_eq!(
+        packed.len(),
+        16 + 9 + 4,
+        "CONST payload is one 32-bit lane word"
+    );
+    assert_eq!(&packed[25..29], &1.5f32.to_bits().to_le_bytes());
+    // An f32 column and the same values as f64 give different streams (the
+    // f64 one is at least as large on every mode that stores lane words).
+    let vals32: Vec<f32> = (0..5000).map(|i| (i as f32 * 0.7).sin()).collect();
+    let vals64: Vec<f64> = vals32.iter().map(|&v| f64::from(v)).collect();
+    for level in [Level::Fastest, Level::Fast, Level::Balanced, Level::Max] {
+        let cfg = Config {
+            level,
+            ..Config::default()
+        };
+        let p32 = compress_column(ColumnRef::F32(&vals32), None, cfg);
+        let p64 = compress_column(ColumnRef::F64(&vals64), None, cfg);
+        assert!(
+            p32.len() <= p64.len(),
+            "{level:?}: native f32 ({}) ≤ exact f64 ({})",
+            p32.len(),
+            p64.len()
+        );
+    }
+}
+
+#[test]
+fn legacy_v2_narrow_streams_are_rejected_wide_ones_decode() {
+    // A v2 f32 stream held widened-f64 payloads; misreading it as v3 would be
+    // silent garbage, so the decoder refuses it explicitly.
+    let mut p = compress_column(ColumnRef::F32(&[1.0, 2.0, 3.0]), None, Config::default());
+    p[4] = 2;
+    assert_eq!(
+        decompress_column(&p),
+        Err(quoin::Error::UnsupportedVersion(2))
+    );
+    let mut p = compress_column(ColumnRef::I32(&[1, 2, 3]), None, Config::default());
+    p[4] = 2;
+    assert_eq!(
+        decompress_column(&p),
+        Err(quoin::Error::UnsupportedVersion(2))
+    );
+    // 64-bit lanes and decimals did not change layout: a v2 stamp still decodes.
+    let mut p = compress_column(ColumnRef::F64(&[1.0, 2.0, 3.0]), None, Config::default());
+    assert_eq!(p[4], 3);
+    p[4] = 2;
+    assert_eq!(
+        decompress_column(&p).unwrap().values,
+        Column::F64(vec![1.0, 2.0, 3.0])
+    );
+    let mut p = compress_column(
+        ColumnRef::Decimal128 {
+            values: &[1, 2, 3],
+            scale: 2,
+            precision: 10,
+        },
+        None,
+        Config::default(),
+    );
+    p[4] = 2;
+    assert!(decompress_column(&p).is_ok());
+    p[4] = 1;
+    assert_eq!(
+        decompress_column(&p),
+        Err(quoin::Error::UnsupportedVersion(1))
+    );
+}
+
+#[test]
+fn i32_u32_native_lane_behaviour() {
+    // CONST on the 32-bit lane is a 4-byte payload; the lane is signed-aware.
+    let packed = compress_column(ColumnRef::I32(&[-7i32; 1000]), None, Config::default());
+    assert_eq!(packed.len(), 16 + 9 + 4);
+    assert_eq!(&packed[25..29], &(-7i32).to_le_bytes());
+    // Every level/selection, several shapes, exact.
+    let mut s = 11u64;
+    let shapes: Vec<Vec<i32>> = vec![
+        (0..70_000).map(|i| (i % 4093) - 2000).collect(), // mixed sign, bounded
+        (0..70_000).map(|_| (lcg(&mut s) >> 32) as i32).collect(), // noise
+        (0..70_000).map(|i| i * 2 + (i % 3)).collect(),   // monotone (relative time)
+        vec![i32::MIN, i32::MAX, 0, -1, 1],
+        vec![],
+    ];
+    for vals in &shapes {
+        for cfg in all_configs() {
+            roundtrip_i32(vals, cfg);
+            let u: Vec<u32> = vals.iter().map(|&v| v as u32).collect();
+            roundtrip_u32(&u, cfg);
+        }
+    }
+    // The 32-bit lane allows 2× the 64-bit block value cap (same byte budget).
+    let big: Vec<u32> = (0..300_000u32).map(|i| i % 1000).collect();
+    let packed = compress_column(
+        ColumnRef::U32(&big),
+        None,
+        Config {
+            block_size: Some(1 << 30),
+            ..Config::default()
+        },
+    );
+    roundtrip_u32(&big, Config::default());
+    match decompress_column(&packed).unwrap().values {
+        Column::U32(got) => assert_eq!(got, big),
+        _ => panic!(),
+    }
+    // Frame value counts: 262144 (the 32-bit cap) then the remainder.
+    let n0 = u32::from_le_bytes(packed[17..21].try_into().unwrap());
+    assert_eq!(n0, 256 * 1024, "32-bit lane blocks hold 256 Ki values");
+}
+
+#[test]
+fn f32_mode_coverage_is_native() {
+    // Sanity that the float-value codecs actually engage on f32 (not just RAW/
+    // pco): a decimal column at `Fast` (no entropy, no pco) must compress well —
+    // only ALP / FLOAT_MULT / bit-packers are available there.
+    let vals: Vec<f32> = (0..50_000)
+        .map(|i| 1000.0 + (i % 9000) as f32 * 0.1)
+        .collect();
+    let cfg = Config {
+        level: Level::Fast,
+        ..Config::default()
+    };
+    let size = roundtrip_f32_bits(&vals, cfg, "decimal @ Fast");
+    assert!(
+        size < vals.len() * 2,
+        "ALP/FLOAT_MULT must engage on f32 decimals: {size}"
+    );
+    // And a smooth non-decimal signal at High (float predictors, f32 arithmetic).
+    let smooth: Vec<f32> = (0..50_000)
+        .map(|i| ((i as f32) * 0.0007).sin() * 1.0e-3)
+        .collect();
+    let cfg = Config {
+        level: Level::High,
+        ..Config::default()
+    };
+    let size = roundtrip_f32_bits(&smooth, cfg, "smooth @ High");
+    assert!(
+        size < smooth.len() * 3,
+        "predictors must engage on smooth f32: {size}"
+    );
 }

@@ -1,10 +1,12 @@
-//! `quoin` — a lossless compressor for typed columns of numbers (`f64`, `i64`,
-//! `u64` today; see [`DType`]).
+//! `quoin` — a lossless compressor for typed columns of numbers (`f64`, `f32`,
+//! `i64`, `u64`, `i32`, `u32`, decimals; see [`DType`]).
 //!
 //! It runs a per-block competition between specialized codecs and emits the
-//! smallest result. The engine works on a single `u64` lane internally; the
-//! column [`DType`] selects the codec family (integer vs float) and is recorded
-//! in the stream so the decoder restores the original type. Use
+//! smallest result. The engine is generic over a physical **lane** — a `u64`
+//! word per value for the 64-bit types, a `u32` word for the 32-bit types — so
+//! every column is compressed at its native width; the column [`DType`] selects
+//! the codec family (integer vs float) and is recorded in the stream so the
+//! decoder restores the original type. Use
 //! [`compress_column`]/[`decompress_column`] for the typed path, or
 //! [`compress`]/[`decompress`] for the `f64` convenience case.
 //!
@@ -44,14 +46,13 @@ mod entropy;
 mod error;
 mod format;
 mod hash;
+mod lane;
 mod mode;
 mod transform;
 mod validity;
 mod varint;
 
-use std::borrow::Cow;
-
-use zerocopy::{FromBytes, Immutable, IntoBytes};
+use lane::{Lane, reinterpret};
 
 pub use dtype::DType;
 pub use error::Error;
@@ -225,7 +226,8 @@ pub struct Config {
     /// Fixed block size in **values**, or `None` for the adaptive default
     /// (a base quantum grown for low-entropy regions). When `Some(n)`, every
     /// block holds exactly `n` values (the last may be shorter), clamped to
-    /// `[1, `[`MAX_BLOCK_SIZE`]`]`.
+    /// `[1, `[`MAX_BLOCK_SIZE`]`]` for the 64-bit types and to twice that for
+    /// the 32-bit types (the same 1 MiB byte budget).
     ///
     /// This is a granularity knob, not a pure-ratio one. **Smaller** blocks give
     /// cheaper random access (decode one block for a point lookup), finer
@@ -255,16 +257,19 @@ impl Config {
         self.predictor_log2.clamp(10, 16)
     }
 
-    /// The configured fixed block size clamped to the valid range, or `None`
-    /// for adaptive sizing.
-    pub(crate) fn fixed_block_size(&self) -> Option<usize> {
-        self.block_size.map(|n| n.clamp(1, MAX_BLOCK_SIZE))
+    /// The configured fixed block size clamped to the valid range for a lane of
+    /// `lane_bytes` bytes per value, or `None` for adaptive sizing.
+    pub(crate) fn fixed_block_size(&self, lane_bytes: usize) -> Option<usize> {
+        self.block_size
+            .map(|n| n.clamp(1, format::max_block_values(lane_bytes)))
     }
 }
 
-/// The largest block size (in values) the decoder accepts — a fixed
-/// [`Config::block_size`] is clamped to this. It bounds per-block allocation and
-/// stops a tiny frame from claiming a huge value count (a decompression bomb).
+/// The largest block size (in values) the decoder accepts for the 64-bit types
+/// — a fixed [`Config::block_size`] is clamped to this (the 32-bit types allow
+/// twice as many values: the limit is 1 MiB of lane data either way). It bounds
+/// per-block allocation and stops a tiny frame from claiming a huge value count
+/// (a decompression bomb).
 pub const MAX_BLOCK_SIZE: usize = format::MAX_BLOCK_VALUES;
 
 /// A borrowed typed column — the input to [`compress_column`]. The variant
@@ -396,36 +401,6 @@ impl<'a> ColumnRef<'a> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    /// Lower every value to the `u64` lane (sign-extending `i32`, widening `f32`
-    /// to its exact `f64` so the float-value codecs apply directly).
-    ///
-    /// The 8-byte lanes (`f64`/`i64`/`u64`) are **reinterpreted in place** — the
-    /// bit pattern of an `f64`/`i64` is exactly its `u64` lane word — so they
-    /// return a borrowed view with no allocation. The narrower / re-typed lanes
-    /// (`i32`/`u32`/`f32`) genuinely change width, so they must allocate.
-    fn to_lane(self) -> Cow<'a, [u64]> {
-        match self {
-            ColumnRef::F64(s) => Cow::Borrowed(reinterpret_as_u64(s)),
-            ColumnRef::I64(s) => Cow::Borrowed(reinterpret_as_u64(s)),
-            ColumnRef::U64(s) => Cow::Borrowed(s),
-            ColumnRef::I32(s) => Cow::Owned(s.iter().map(|&i| i as i64 as u64).collect()),
-            ColumnRef::U32(s) => Cow::Owned(s.iter().map(|&u| u64::from(u)).collect()),
-            ColumnRef::F32(s) => Cow::Owned(s.iter().map(|&f| (f as f64).to_bits()).collect()),
-            // Decimals are wider than the lane; they are routed to the decimal
-            // container in `compress_column` before `to_lane` is ever reached.
-            ColumnRef::Decimal128 { .. } | ColumnRef::Decimal256 { .. } => {
-                unreachable!("decimals use the decimal container")
-            }
-        }
-    }
-}
-
-/// Reinterpret a slice of 8-byte `zerocopy`-compatible values as the `u64` lane
-/// with **no copy**. Used for `f64`/`i64`/`u64`, whose bit patterns *are* their
-/// lane words; the size/alignment match `u64` exactly, so the cast never fails.
-fn reinterpret_as_u64<T: IntoBytes + Immutable>(s: &[T]) -> &[u64] {
-    <[u64]>::ref_from_bytes(s.as_bytes()).expect("8-byte lane reinterprets as u64")
 }
 
 /// A decoded column: the typed values plus an optional Arrow-style validity
@@ -442,33 +417,48 @@ pub struct DecodedColumn {
 ///
 /// Nulls are compacted out — the value codec sees only the valid values — and
 /// the bitmap is stored as its own (run-length-friendly) stream. Float values
-/// are compressed via their raw IEEE-754 bit patterns (exact for NaN/±0);
-/// integer columns run the integer codec family.
+/// are compressed via their raw IEEE-754 bit patterns (exact for every pattern,
+/// NaN payloads and ±0 included); integer columns run the integer codec family.
+/// Every input slice is reinterpreted **in place** as its lane (`f32`/`i32`/
+/// `u32` → `u32`, `f64`/`i64`/`u64` → `u64`) — no widening, no copy.
 pub fn compress_column(col: ColumnRef, validity: Option<&[u8]>, cfg: Config) -> Vec<u8> {
-    // Decimals are wider than the `u64` lane and own a dedicated container.
     match col {
+        ColumnRef::F64(s) => compress_typed(reinterpret::<f64, u64>(s), DType::F64, validity, cfg),
+        ColumnRef::I64(s) => compress_typed(reinterpret::<i64, u64>(s), DType::I64, validity, cfg),
+        ColumnRef::U64(s) => compress_typed(s, DType::U64, validity, cfg),
+        ColumnRef::I32(s) => compress_typed(reinterpret::<i32, u32>(s), DType::I32, validity, cfg),
+        ColumnRef::U32(s) => compress_typed(s, DType::U32, validity, cfg),
+        ColumnRef::F32(s) => compress_typed(reinterpret::<f32, u32>(s), DType::F32, validity, cfg),
+        // Decimals are wider than any lane and own a dedicated container.
         ColumnRef::Decimal128 {
             values,
             scale,
             precision,
-        } => return decimal::compress128(values, scale, precision, validity, cfg),
+        } => decimal::compress128(values, scale, precision, validity, cfg),
         ColumnRef::Decimal256 {
             values,
             scale,
             precision,
-        } => return decimal::compress256(values, scale, precision, validity, cfg),
-        _ => {}
+        } => decimal::compress256(values, scale, precision, validity, cfg),
     }
-    let dtype = col.dtype();
-    let n = col.len();
+}
+
+/// Compress a column already lowered to its lane, handling null compaction.
+fn compress_typed<L: Lane>(
+    lane: &[L],
+    dtype: DType,
+    validity: Option<&[u8]>,
+    cfg: Config,
+) -> Vec<u8> {
+    let n = lane.len();
     let has_nulls = validity.is_some_and(|bm| validity::count_valid(bm, n) < n);
     if !has_nulls {
-        // No nulls (or an all-valid bitmap): every value is encoded. `to_lane`
-        // borrows the input for the 8-byte lanes (f64/i64/u64) — no copy.
-        return encoder::compress_lane(&col.to_lane(), dtype, n, None, cfg);
+        // No nulls (or an all-valid bitmap): every value is encoded straight
+        // from the borrowed input.
+        return encoder::compress_lane(lane, dtype, n, None, cfg);
     }
     let bitmap = validity.unwrap();
-    let valid = validity::compact(&col.to_lane(), bitmap);
+    let valid = validity::compact(lane, bitmap);
     encoder::compress_lane(&valid, dtype, n, Some(bitmap), cfg)
 }
 
@@ -513,16 +503,29 @@ pub fn decompress_column(src: &[u8]) -> Result<DecodedColumn, Error> {
             }
         };
     }
-    let (dtype, bits, validity) = decoder::decompress_lane(src)?;
-    let values = match dtype {
-        DType::F64 => Column::F64(bits.into_iter().map(f64::from_bits).collect()),
-        DType::I64 => Column::I64(bits.into_iter().map(|w| w as i64).collect()),
-        DType::U64 => Column::U64(bits),
-        // Narrow back to the low lane bytes.
-        DType::I32 => Column::I32(bits.into_iter().map(|w| w as u32 as i32).collect()),
-        DType::U32 => Column::U32(bits.into_iter().map(|w| w as u32).collect()),
-        // The lane holds the widened `f64`; narrow back to `f32` (exact).
-        DType::F32 => Column::F32(bits.into_iter().map(|w| f64::from_bits(w) as f32).collect()),
+    // The column type (header byte 7) picks the lane; each lane word is then
+    // reinterpreted as the output type (`Vec::into_iter().map().collect()` runs
+    // in place for same-size elements — no second buffer).
+    let dtype = DType::from_wire(*src.get(7).ok_or(Error::Truncated)?)?;
+    let (values, validity) = match dtype {
+        DType::F64 | DType::I64 | DType::U64 => {
+            let (dtype, bits, validity) = decoder::decompress_lane::<u64>(src)?;
+            let values = match dtype {
+                DType::F64 => Column::F64(bits.into_iter().map(f64::from_bits).collect()),
+                DType::I64 => Column::I64(bits.into_iter().map(|w| w as i64).collect()),
+                _ => Column::U64(bits),
+            };
+            (values, validity)
+        }
+        DType::F32 | DType::I32 | DType::U32 => {
+            let (dtype, bits, validity) = decoder::decompress_lane::<u32>(src)?;
+            let values = match dtype {
+                DType::F32 => Column::F32(bits.into_iter().map(f32::from_bits).collect()),
+                DType::I32 => Column::I32(bits.into_iter().map(|w| w as i32).collect()),
+                _ => Column::U32(bits),
+            };
+            (values, validity)
+        }
         // A decimal dtype without the container flag is a corrupt stream (the
         // container path above handles every legitimate decimal).
         DType::Decimal128 | DType::Decimal256 => {
@@ -621,9 +624,10 @@ pub mod bench_internals {
         crate::codecs::pred::dfcm_encode(vals, predictor_log2)
     }
 
-    /// Multiversion-dispatched byte-transpose (for tracking SIMD speed).
+    /// Multiversion-dispatched byte-transpose of 8-byte values (for tracking
+    /// SIMD speed).
     pub fn byte_transpose(src: &[u8], n: usize, dst: &mut [u8]) {
-        crate::transform::byte_transpose(src, n, dst);
+        crate::transform::byte_transpose(src, n, 8, dst);
     }
 
     /// Cascade-lab: the raw (codes, rights) streams ALP-RD currently bit-packs,
@@ -640,13 +644,13 @@ pub mod bench_internals {
         crate::codecs::for_bitpack::encode(vals, false)
     }
     pub fn for_bitpack_decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
-        crate::codecs::for_bitpack::decode(payload, n, false)
+        crate::codecs::for_bitpack::decode::<u64>(payload, n, false)
     }
     pub fn delta_bitpack_encode(vals: &[u64]) -> Vec<u8> {
         crate::codecs::delta_bitpack::encode(vals)
     }
     pub fn delta_bitpack_decode(payload: &[u8], n: usize) -> Result<Vec<u64>, Error> {
-        crate::codecs::delta_bitpack::decode(payload, n)
+        crate::codecs::delta_bitpack::decode::<u64>(payload, n)
     }
 
     /// FastLanes-style 1024-value bit-pack / unpack (for tracking SIMD speed).
