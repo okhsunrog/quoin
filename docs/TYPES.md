@@ -1,10 +1,12 @@
 # Typed columns
 
-`quoin` compresses typed numeric columns. The engine works on one **physical
-lane** — a `u64` word per value — plus a small descriptor that decides which
-codecs apply:
+`quoin` compresses typed numeric columns. The engine works on a **physical
+lane** — a `u64` word per value for the 64-bit types, a `u32` word for the
+32-bit types; every codec is generic over the lane — plus a small descriptor
+that decides which codecs apply:
 
-- **width** — the lane size (only 64-bit today; 8/16/32/128 planned).
+- **width** — the lane size (32- and 64-bit today; 8/16 planned, 128/256 via
+  the decimal container).
 - **family** — int vs float. Decisive: integer columns run frame-of-reference /
   delta / bit-packing on the lane; float columns run the float-value schemes
   (ALP, FLOAT_MULT, float-linear). The type-agnostic codecs (RAW, CONST, STRIDE,
@@ -56,20 +58,22 @@ the limb-split container.
    raw, and **signedness-aware FoR** (`for_bitpack` references the signed
    minimum, so mixed-sign columns pack instead of bailing to 64-bit). Temporal
    types map onto `I64` for free.
-3. ◑ **32-bit lanes** — ✅ `Int32`/`UInt32`: widen to the `u64` lane (sign-extend
-   i32), narrow back to the low bytes on decode; RAW emits 4 B/value so a narrow
-   column's baseline isn't doubled; bit-pack picks the true width. Remaining:
-   narrow `Int8/16`/`UInt8/16` (lane_bytes 1/2) and native narrow bit-packing.
-4. ✅ **`Float32`** — each value is widened to its **exact `f64`** on the lane, so
-   every f64 float-value scheme (ALP, FLOAT_MULT, the predictors, byte-transpose)
-   applies unchanged; the round trip narrows back to `f32`. RAW narrows to the
-   compact 4 B/value form (the widened lane is 8 B but the low mantissa bits are
-   zero, so the agnostic codecs still compress it). Every finite value, infinity,
-   signed zero and subnormal is bit-exact; only signaling-NaN *payload* bits may
-   be quieted (the prediction codecs reconstruct through `f64` arithmetic) — real
-   `Float32` data never carries meaningful NaN payloads, and Parquet/Vortex don't
-   preserve them either. f32 quantization often *helps* the predictors (a smooth
-   `sin`-drift column compresses **better** as f32 than as f64).
+3. ◑ **32-bit lanes** — ✅ `Int32`/`UInt32` run on a **native `u32` lane**
+   (format v3): the slice is reinterpreted in place, FoR is signed-aware at 32
+   bits, CONST/STRIDE/dictionary/RLE entries and byte planes are 4 bytes, the
+   predictor tables hold `u32`, and pco gets the `&[i32]`/`&[u32]` directly.
+   Remaining: narrow `Int8/16`/`UInt8/16` (lane_bytes 1/2).
+4. ✅ **`Float32`** — the same native `u32` lane, with the float-value codecs
+   running in **`f32` arithmetic with `f32` constants**: ALP uses the reference's
+   float parameters (exponents to 10, magic `1.5·2^23`), FLOAT_MULT verifies
+   `k/scale` in `f32`, DELTA2/DELTA_DP extrapolate in `f32`, and pco compresses
+   the `&[f32]` as is. No value is ever converted to `f64`. **Every** bit pattern
+   round-trips exactly — finite values, ±0, subnormals, infinities and NaNs with
+   any payload or signaling bit: the float-arithmetic codecs verify each value's
+   reconstruction bit-for-bit (ALP/FLOAT_MULT/DELTA_DP) or are skipped for a
+   block containing any inf/NaN (DELTA2/DELTA_DP), so decoding never depends on
+   the platform's NaN-propagation rules. (Before v3, `f32` was widened to its
+   exact `f64` on the `u64` lane; those v2 streams are rejected, not misread.)
 5. ✅ **`Decimal128`** (`src/decimal.rs`) — a **limb-split container**, not a new
    lane kernel. Subtract a global `vmin` (column min) → a non-negative offset,
    split it into 64-bit limbs (2 for `Decimal128`), and run **each limb as an

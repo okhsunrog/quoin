@@ -62,7 +62,7 @@ column onto a physical **lane** and lets type-appropriate codecs compete:
 | Input type | Lane | Notes |
 | --- | --- | --- |
 | `f64` / `i64` / `u64` | 64-bit | **zero-copy** reinterpret to the `u64` lane |
-| `i32` / `u32` / `f32` | widened | sign/zero-extended or exact-widened, narrowed back on decode |
+| `i32` / `u32` / `f32` | 32-bit | **zero-copy** reinterpret to the `u32` lane — native width, no widening |
 | `Decimal128` / `Decimal256` | 128 / 256-bit | dedicated decimal container (precision/scale preserved) |
 
 Knowing the family (`Float` vs `Int`) gates which codecs even enter the
@@ -94,7 +94,8 @@ biases toward cheap-to-decode modes).
 
 ## How it works
 
-quoin lowers each typed column to a single `u64` lane, splits it into independent
+quoin lowers each typed column to its physical lane (`u32` or `u64`, by a zero-copy
+reinterpret), splits it into independent
 **blocks**, and runs a **per-block competition**: every applicable codec encodes the
 block and the smallest wins, scored by `size + λ·decode_cost`. The pool is
 type-specialized (frame-of-reference + bit-packing and delta cascades for integers;

@@ -387,11 +387,101 @@ because neither vectorizes. pco decode through quoin runs at **~2.8–3.4 GB/s**
 on `sensor_f64`, several times faster than vortex-compact's decode of the same
 column. See `vendor/quoin-pco/NOTICE` for the full list of fork changes.
 
+### Native 32-bit lane on real stylus data (BOOX Notes `PointDocument`)
+
+Measured with `examples/boox_points.rs` on three real ONYX BOOX Notes `#points`
+files (203 strokes, 36 199 points, 589 168 bytes in total; private handwriting,
+not in the repository). Each file is parsed, re-serialized byte-for-byte, split
+into its six physical columns — `x`/`y` (`f32`), `pressure` (`i16`→`I32`),
+`tiltX`/`tiltY` (`i8`→`I32`), per-stroke relative `time` (`i32`) — and every
+column is compressed as a typed quoin column and decoded back bit-exactly. Totals
+below are the six columns plus the verbatim sidecar (header, stroke attributes,
+index, xref: 1.7 % of the file). **A/B against the frozen pre-v3 library**
+(commit `ad44862`, widened-`f64` lane), same binary code, same machine, pinned
+to one core, two independent runs each (sizes identical between runs; times are
+the sum of per-column medians of five ~3 ms batches).
+
+| file (points) | level | bytes: widened → native | encode ms: widened → native | decode ms: widened → native |
+| --- | --- | ---: | ---: | ---: |
+| points-1 (3 122) | Fastest | 41 438 → 41 366 | 0.149 → 0.101 | 0.020 → 0.012 |
+| | Fast | 36 420 → **27 917** | 1.430 → 0.686 | 0.019 → 0.078 |
+| | Balanced | 9 539 → 9 539 | 3.572 → 2.126 | 0.057 → 0.051 |
+| | Balanced/Sample | 9 539 → 9 539 | 2.171 → 1.397 | 0.056 → 0.050 |
+| | High | 9 539 → 9 539 | 15.276 → 8.931 | 0.057 → 0.050 |
+| | Max | 9 216 → 9 216 | 18.465 → 11.157 | 0.079 → 0.073 |
+| | pco level 8 / 12 | 9 389 / 9 066 | 0.624 / 1.577 | 0.050 / 0.072 |
+| points-2 (2 301) | Fastest | 30 746 → 29 092 | 0.112 → 0.074 | 0.014 → 0.013 |
+| | Fast | 27 513 → **18 890** | 0.846 → 0.504 | 0.015 → 0.057 |
+| | Balanced | 6 658 → 6 658 | 3.017 → 1.816 | 0.044 → 0.040 |
+| | Max | 6 562 → 6 562 | 14.177 → 8.590 | 0.066 → 0.062 |
+| | pco level 8 / 12 | 6 508 / 6 412 | 0.516 / 1.145 | 0.039 / 0.063 |
+| points-3 (30 776) | Fastest | 369 814 → **296 742** | 1.144 → 0.675 | 0.173 → 0.174 |
+| | Fast | 304 198 → **218 666** | 5.730 → 4.589 | 0.264 → 0.490 |
+| | Balanced | 79 564 → 87 040 | 27.175 → 19.019 | 0.420 → 0.273 |
+| | Balanced/Sample | 79 564 → 79 564 | 16.309 → 11.422 | 0.423 → 0.381 |
+| | High | 79 043 → **76 524** | 137.201 → 78.497 | 1.380 → 4.900 |
+| | Max | 76 417 → 75 888 | 163.222 → 92.894 | 1.418 → 3.243 |
+| | pco level 8 / 12 | 79 414 / 76 697 | 2.838 / 5.358 | 0.371 / 0.418 |
+
+What the native lane changes, and what it does not:
+
+- **Encode is 1.5–2× faster at every level** — half the lane bytes through every
+  probe, `f32` arithmetic in the float codecs, and pco fed the `&[f32]` directly.
+- **The non-entropy levels compress much better** (`Fast` −23…−31 %, `Fastest`
+  up to −20 % on the dense page): XORZ residuals and second-order deltas of `f32`
+  bit patterns fit in 32 bits, so XORZ/DELTA_BITPACK/DICT now beat RAW on the
+  coordinate columns where the widened lane's 64-bit residuals could not.
+- **Balanced/High/Max sizes are unchanged where pco won** (pco's `f32` bytes are
+  identical either way) and slightly better where a native codec now edges it
+  (`High` on the dense page: ORDERED_DELTA on `x`/`y`/`pressure`, −3 %).
+- Two visible **selection effects**, both the existing policy at work rather than
+  the lane: at `Balanced` (λ = 2) the tilt columns of the dense page switch from
+  pco (1 029 B) to RLE (4 358 B) because RLE's 4-byte run values now land inside
+  the decode-cost margin, costing +9 % on that file (Balanced/Sample, which does
+  not rank RLE, keeps pco); and at `High`/`Max` (λ = 0, pure size) the 3 %
+  smaller ORDERED_DELTA wins over pco on the dense page and decodes 2–3× slower
+  (a serial varint + range-coder recurrence). Tuning that trade-off is a
+  selection-policy question, tracked separately.
+- The `pressure`/`tilt`/`time` columns are genuine integer columns and land
+  within a few percent of pco at every level from `Balanced` up; per-stroke
+  relative `time` compresses to ~0.13 B/point, and its per-point delta
+  (`time-delta` in the CSV) to ~0.12 B/point via DICT.
+
+The same A/B through the unmodified ink benchmark harness (`bench pilot`: six
+pages, all methods, baseline and native builds back-to-back on one core) agrees.
+Sizes are deterministic; timings on the three tiny pages (<4 K points) drifted
+2–4× *for the control methods too* (pco, zstd) between the two processes, so only
+the large pages carry timing information:
+
+| page (points) | level | bytes: widened → native | encode ms | decode ms |
+| --- | --- | ---: | ---: | ---: |
+| dense_cursive (209 439) | Fastest | 2 644 701 → **1 855 510** (−30 %) | 7.9 → 5.0 | 2.37 → 1.89 |
+| | Fast | 2 019 040 → **1 307 718** (−35 %) | 31.4 → 24.0 | 2.43 → 2.91 |
+| | Balanced | 802 031 → 806 065 (+0.5 %) | 131.0 → 75.0 | 4.30 → 3.53 |
+| | Max | 752 456 → 745 266 (−1 %) | 1 070 → 822 | 10.5 → 34.0 |
+| | pco-f32 (control) | 805 947 → 805 947 | 16.0 → 16.5 | 3.56 → 3.72 |
+| mixed (269 206) | Fastest | 3 410 269 → **2 386 949** (−30 %) | 10.8 → 7.2 | 3.60 → 3.16 |
+| | Balanced | 1 014 676 → 1 000 386 (−1.4 %) | 185.7 → 112.1 | 6.23 → 5.12 |
+| | Max | 903 744 → **825 274** (−8.7 %) | 1 277 → 942 | 30.8 → 44.2 |
+| | pco-f32 (control) | 1 016 433 → 1 016 433 | 23.9 → 22.6 | 5.70 → 5.47 |
+| note_print (30 555) | Fastest | 390 209 → **286 036** (−27 %) | 0.96 → 0.77 | 0.21 → 0.24 |
+| | Balanced | 131 914 → 131 909 | 20.4 → 13.4 | 0.51 → 0.52 |
+| | Max | 127 959 → 127 751 | 174.4 → 97.3 | 1.53 → 1.50 |
+
+The `Max` decode slowdown on the two dense pages is the pure-size policy
+(λ = 0) picking the serial ORDERED_DELTA / DELTA2 predictors now that their
+32-bit residuals are smaller than pco's output; `Balanced` (recurrence-free by
+contract) decodes *faster* than before everywhere the controls are stable.
+
 ### Float32 lane
 
-`Float32` columns widen each value to its exact `f64` on the lane, so the whole f64
-codec set applies; RAW narrows back to 4 B. Two f32 columns were added to both the
-Parquet and Vortex benches:
+`Float32` columns now run on a **native 32-bit lane** (format v3): every codec —
+ALP, FLOAT_MULT, the polynomial predictors, pco, bit-packing, dictionaries,
+byte-transpose — works at 32 bits with `f32` arithmetic, and nothing is widened
+to `f64`. The table below predates that change (it was measured on the earlier
+widened-`f64` lane); the native lane's own measurements are in the ink-stroke
+study referenced from the README. Two f32 columns were added to both the Parquet
+and Vortex benches:
 
 | column | quoin-max | parquet-zstd9 | vortex-compact |
 | --- | --- | --- | --- |

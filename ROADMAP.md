@@ -114,11 +114,13 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
 4. [x] **Typed column API** — generalize off `f64` to real typed columns + a type
        tag, so the integer codecs operate on real columns, not f64 bits.
        `DType`/`ColumnRef`/`Column` + `compress_column`, format v2 carries the
-       column type, family-aware gating, **64-bit** (`F64`/`I64`/`U64`), **32-bit**
-       (`I32`/`U32`/`F32`) lanes with signedness-aware FoR and width-aware RAW, and
-       **`Decimal128`/`Decimal256`** containers (scale/precision preserved). Narrow
-       `8/16`-bit are widened at the C-ABI boundary (no native lane yet). See
-       [`docs/TYPES.md`](docs/TYPES.md).
+       column type, family-aware gating, **64-bit** (`F64`/`I64`/`U64`) and
+       **native 32-bit** (`I32`/`U32`/`F32`) lanes — the engine is generic over
+       the lane word, so 32-bit columns pack, hash, transpose and run their float
+       codecs at 32 bits (format v3; `f32` is bit-exact for every pattern, NaN
+       payloads included) — and **`Decimal128`/`Decimal256`** containers
+       (scale/precision preserved). Narrow `8/16`-bit are widened to 32 at the
+       C-ABI boundary (no native lane yet). See [`docs/TYPES.md`](docs/TYPES.md).
 
    Benchmarked against zstd/lz4/deflate on the ALP float corpus — see
    [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). The losses there set the order

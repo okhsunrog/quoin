@@ -14,24 +14,27 @@ the column's *type* is known, only codecs that make sense for that type compete.
 
 Two design decisions shape everything:
 
-1. **One physical lane.** Every typed column is lowered to a single `u64` lane
-   (decimals to a wider container). The codecs are written once against that lane;
-   the [`DType`] just selects which *family* of codecs may compete and is recorded
-   in the stream so the decoder restores the original type.
+1. **One lane abstraction, two widths.** Every typed column is lowered — by a
+   zero-copy reinterpret — to a physical lane word: `u64` for the 64-bit types,
+   `u32` for the 32-bit types (decimals to a wider container). The codecs are
+   written once, generic over the [`Lane`](../src/lane.rs) trait, so a 32-bit
+   column is packed, hashed, delta-coded, transposed and float-predicted at its
+   **native width**; the [`DType`] selects which *family* of codecs may compete
+   and is recorded in the stream so the decoder restores the original type.
 2. **Independent blocks.** Each block carries its own winning codec and entropy
    coder. This is what makes encode/decode parallel and gives random access at
    block granularity.
 
 ```
         ┌─ compress ──────────────────────────────────────────────┐
-typed   │  ColumnRef ──► u64 lane ──► plan blocks ──► per block:   │   byte
+typed   │  ColumnRef ──► lane (u32/u64) ► plan blocks ──► per block:│   byte
 column  │  (zero-copy   (DType,         (adaptive      competition │   stream
  (+nulls)│   reinterpret) validity)     sizing)        → frame     │  (header
         │                                              ◄───────────┤   + frames)
         └──────────────────────────────────────────────────────────┘
         ┌─ decompress ─────────────────────────────────────────────┐
 byte    │  header ──► frames (parallel) ──► per frame: mode decode  │   typed
-stream  │             ──► u64 lane ──► widen to DType ──► validity  │   column
+stream  │             ──► lane words ──► reinterpret as DType ──► validity │ column
         └──────────────────────────────────────────────────────────┘
 ```
 
@@ -62,16 +65,26 @@ stream  │             ──► u64 lane ──► widen to DType ──► va
 
 ## 3. Lanes & types
 
-The codec engine only ever sees a `u64` slice. Lowering a typed column to that
-lane (`ColumnRef::to_lane`):
+The codec engine sees a slice of lane words — `&[u64]` or `&[u32]` — through the
+`Lane` trait (`lane.rs`), which also exposes the lane's float view (`f64`/`f32`)
+for the float-value codecs. Lowering a typed column (`compress_column`):
 
 | Input type | Lane | How |
 | --- | --- | --- |
 | `f64` / `i64` / `u64` | `u64` | **zero-copy** bit-cast of the slice (no allocation) |
-| `i32` | `u64` | sign-extend, narrow back on decode |
-| `u32` | `u64` | zero-extend |
-| `f32` | `u64` | exact-widen to `f64`, then bit-cast |
-| `Decimal128/256` | 128/256-bit | dedicated `decimal.rs` container (not the `u64` lane) |
+| `f32` / `i32` / `u32` | `u32` | **zero-copy** bit-cast of the slice (no allocation) |
+| `Decimal128/256` | 128/256-bit | dedicated `decimal.rs` container (not a lane) |
+
+Nothing is widened: a 32-bit column's constants, dictionary entries, FoR minima
+and byte planes are 4 bytes on the wire, its predictor tables hold `u32`, its
+ALP/FLOAT_MULT/DELTA2 arithmetic is `f32` with `f32` constants (ALP exponents to
+10, magic `1.5·2^23`), and pco is handed the `&[f32]`/`&[i32]`/`&[u32]` slice as
+is. Block quanta are counted in **bytes** (256 KiB base, 1 MiB max), so a 32-bit
+lane holds twice the values per block. Every `f32` bit pattern round-trips
+exactly — NaN payloads and signaling bits included: the float-arithmetic codecs
+either verify each value's reconstruction bit-for-bit (ALP, FLOAT_MULT,
+DELTA_DP) or are skipped for a block containing any inf/NaN (DELTA2/DELTA_DP),
+so no path depends on the platform's NaN-propagation rules.
 
 `Family` (from `DType`) gates the competition: `Float` unlocks the float-value
 codecs (ALP, ALP-RD, FLOAT_MULT) and the float predictors; `Int` runs
@@ -140,7 +153,8 @@ decode-cost class.
 
 `decode_frames` (`decoder.rs`) scans frame boundaries, then decodes frames in
 parallel. Per frame: read the mode byte → dispatch to that codec's `decode` →
-producing the `u64` lane → widen to the column `DType` → reattach validity. The
+producing lane words → reinterpret in place as the column `DType` → reattach
+validity. The
 decoder is fuzz-hardened: every length/offset is bounds-checked, and a corrupt
 stream returns `Error`, never panics or over-allocates.
 
@@ -239,10 +253,15 @@ header  = magic ++ version ++ dtype ++ flags ++ n_values ++ predictor_log2
 frame   = mode:u8 ++ payload          (one per block)
 ```
 
-The header records the column `DType`; flags mark the optional validity bitmap
-and the optional shared-dictionary preamble (the column-wide value table for
-`DictShared` frames), each of which follows the header in that order. Each
-frame's payload layout is mode-specific. The format is **internal** (not stabilized
+The header records the column `DType`, which fixes the lane width of every
+frame; flags mark the optional validity bitmap and the optional
+shared-dictionary preamble (the column-wide value table for `DictShared`
+frames), each of which follows the header in that order. Each frame's payload
+layout is mode-specific and laid out in lane words. The version byte is **3**;
+v2 streams of the 64-bit types and the decimal containers (whose layout did not
+change) still decode, while v2 streams of the 32-bit types (widened-`f64`
+payloads) are rejected with `UnsupportedVersion` rather than misread. The format
+is **internal** (not stabilized
 across versions) — the decoder always matches the encoder in the same build.
 
 ---
