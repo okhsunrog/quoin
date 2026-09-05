@@ -22,24 +22,34 @@
 //! Non-decimal reals are handled by [`super::alp_rd`], the ALP-RD
 //! split-dictionary scheme.
 //!
+//! The digits are stored through the **patched** packer of
+//! [`super::for_bitpack`] (a rare huge-but-exact digit becomes an exception
+//! instead of widening the sub-block), either directly (frame-of-reference
+//! against the minimum digit) or as **zigzag deltas** of consecutive digits —
+//! whichever is smaller per sub-block (`DELTA_FLAG` in the `e` byte). The delta
+//! form is what makes smooth decimal streams (sensor readings, prices) cheap
+//! without an entropy coder.
+//!
 //! Payload: `varint(n)` then per 1024-value sub-block either
-//! `e:u8 ++ f:u8 ++ n_exc:u16 ++ min:lane ++ width:u8 ++ packed ++ (pos:u16 ++ bits:lane)*`
-//! or `RAW_SUB:u8 ++ count lane words`.
+//! `e[|DELTA_FLAG]:u8 ++ f:u8 ++ n_exc:u16 ++ min:lane ++ residuals ++ (pos:u16 ++ bits:lane)*`
+//! (`residuals` as written by `for_bitpack::pack_residuals`) or
+//! `RAW_SUB:u8 ++ count lane words`.
 
-use crate::bitpack::{self, BLOCK};
+use crate::bitpack::BLOCK;
+use crate::codecs::for_bitpack::{pack_residuals, unpack_residuals};
 use crate::error::Error;
 use crate::lane::{Lane, LaneFloat};
 use crate::varint;
 
 /// `e` byte marking a sub-block stored as verbatim lane words.
 const RAW_SUB: u8 = 0xFF;
+/// Flag in the `e` byte: the digit residuals are zigzag deltas of consecutive
+/// digits (the first relative to `min`) rather than offsets from `min`.
+const DELTA_FLAG: u8 = 0x40;
 /// `(e, f)` candidates carried from the block-level sample to each sub-block.
 const TOP_K: usize = 5;
 /// Values sampled across the block for the stage-1 search.
 const STAGE1_SAMPLES: usize = 1024;
-/// Lanes in the `u64` packing kernel (mirrors `for_bitpack`).
-const LANES64: usize = 16;
-
 #[inline]
 fn encode_value<F: LaneFloat>(v: F, e: usize, f: usize) -> Option<i64> {
     let tmp = v * F::exp10(e) * F::frac10(f);
@@ -83,15 +93,25 @@ fn all_pairs<F: LaneFloat>() -> impl Iterator<Item = (usize, usize)> {
     (0..=F::ALP_MAX_EXP).flat_map(|e| (0..=e).map(move |f| (e, f)))
 }
 
-/// Stride-sample `count` values of `vals` as floats.
+/// Sample `count` values of `vals` as floats: `SAMPLE_RUNS` contiguous runs
+/// spread across the slice. Contiguous runs, not a stride — a stride aliases
+/// with periodic data (every 4th value of a `k·0.5` ramp is an integer, so a
+/// stride-4 sample would pick the integer scale and make half the block
+/// exceptions).
 fn sample_floats<L: Lane>(vals: &[L], count: usize) -> Vec<L::Float> {
+    const SAMPLE_RUNS: usize = 8;
     let n = vals.len();
-    let stride = (n / count).max(1);
-    (0..n)
-        .step_by(stride)
-        .take(count)
-        .map(|i| vals[i].to_float())
-        .collect()
+    if n <= count {
+        return vals.iter().map(|v| v.to_float()).collect();
+    }
+    let run_len = (count / SAMPLE_RUNS).max(1);
+    let runs = count / run_len;
+    let mut out = Vec::with_capacity(count);
+    for r in 0..runs {
+        let start = if runs == 1 { 0 } else { r * (n - run_len) / (runs - 1) };
+        out.extend(vals[start..start + run_len].iter().map(|v| v.to_float()));
+    }
+    out
 }
 
 /// Stage 1: score every pair on a block-wide sample; return the best
@@ -186,47 +206,38 @@ fn encode_subblock<L: Lane>(sub: &[L], e: usize, f: usize, out: &mut Vec<u8>) {
         *d = filler;
     }
 
-    let min = *digits.iter().min().unwrap();
-    let max = *digits.iter().max().unwrap();
-    let range = max.wrapping_sub(min) as u64;
-    let width = if range == 0 {
-        0
+    let count = sub.len();
+    let min = *digits[..count].iter().min().unwrap();
+
+    // Two digit streams, both through the patched packer: offsets from the
+    // minimum, or zigzag deltas of consecutive digits. Keep the smaller.
+    let mut plain = [0u64; BLOCK];
+    let mut delta = [0u64; BLOCK];
+    let mut prev = min;
+    for k in 0..count {
+        let d = digits[k];
+        plain[k] = d.wrapping_sub(min) as u64;
+        let step = d.wrapping_sub(prev);
+        delta[k] = ((step << 1) ^ (step >> 63)) as u64;
+        prev = d;
+    }
+    let mut plain_bytes = Vec::new();
+    pack_residuals(&plain, count, &mut plain_bytes);
+    let mut delta_bytes = Vec::new();
+    pack_residuals(&delta, count, &mut delta_bytes);
+    let (flag, stream) = if delta_bytes.len() < plain_bytes.len() {
+        (DELTA_FLAG, delta_bytes)
     } else {
-        64 - range.leading_zeros()
+        (0, plain_bytes)
     };
 
-    out.push(e as u8);
+    out.push(e as u8 | flag);
     out.push(f as u8);
     out.extend_from_slice(&(exceptions.len() as u16).to_le_bytes());
     // The digit range is bounded by `ALP_UPPER`, which fits the lane as a
     // signed value (i32 on the 32-bit lane).
     L::from_signed(min).write_le(out);
-    out.push(width as u8);
-    if width == 0 {
-        // constant digits
-    } else if width <= 32 {
-        let mut residuals = [0u32; BLOCK];
-        for (r, &d) in residuals.iter_mut().zip(digits.iter()) {
-            *r = d.wrapping_sub(min) as u32;
-        }
-        let mut packed = vec![0u32; 32 * width as usize];
-        bitpack::pack(&residuals, width, &mut packed);
-        for w in &packed {
-            out.extend_from_slice(&w.to_le_bytes());
-        }
-    } else {
-        // Wide digit range (64-bit lane only: the 32-bit lane's digits are
-        // bounded by 2^22): the u64 FastLanes kernel.
-        let mut residuals = [0u64; BLOCK];
-        for (r, &d) in residuals.iter_mut().zip(digits.iter()) {
-            *r = d.wrapping_sub(min) as u64;
-        }
-        let mut packed = vec![0u64; LANES64 * width as usize];
-        bitpack::pack64(&residuals, width, &mut packed);
-        for w in &packed {
-            out.extend_from_slice(&w.to_le_bytes());
-        }
-    }
+    out.extend_from_slice(&stream);
     for &(pos, bits) in &exceptions {
         out.extend_from_slice(&pos.to_le_bytes());
         bits.write_le(out);
@@ -239,8 +250,9 @@ pub(crate) fn decode<L: Lane>(payload: &[u8], n_values: usize) -> Result<Vec<L>,
     if n != n_values {
         return Err(Error::CorruptPayload("alp length mismatch"));
     }
-    let head_len = 5 + L::BYTES;
+    let head_len = 4 + L::BYTES;
     let mut out = Vec::with_capacity(n);
+    let mut residuals = [0u64; BLOCK];
     while out.len() < n {
         let count = (n - out.len()).min(BLOCK);
         if payload.get(pos) == Some(&RAW_SUB) {
@@ -253,53 +265,31 @@ pub(crate) fn decode<L: Lane>(payload: &[u8], n_values: usize) -> Result<Vec<L>,
             continue;
         }
         let head = payload.get(pos..pos + head_len).ok_or(Error::Truncated)?;
-        let e = head[0] as usize;
+        let delta = head[0] & DELTA_FLAG != 0;
+        let e = (head[0] & !DELTA_FLAG) as usize;
         let f = head[1] as usize;
         if e > L::Float::ALP_MAX_EXP || f > e {
             return Err(Error::CorruptPayload("alp exponent/factor"));
         }
         let exc_count = u16::from_le_bytes(head[2..4].try_into().unwrap()) as usize;
         let min = L::read_le(&head[4..4 + L::BYTES]).as_signed();
-        let width = head[4 + L::BYTES];
         pos += head_len;
-        if u32::from(width) > L::BITS {
-            return Err(Error::CorruptPayload("alp width"));
-        }
-
-        let mut digits = [0i64; BLOCK];
-        if width == 0 {
-            digits.fill(min);
-        } else if width <= 32 {
-            let nwords = 32 * width as usize;
-            let pb = payload.get(pos..pos + nwords * 4).ok_or(Error::Truncated)?;
-            pos += nwords * 4;
-            let mut packed = vec![0u32; nwords];
-            for (k, c) in pb.chunks_exact(4).enumerate() {
-                packed[k] = u32::from_le_bytes(c.try_into().unwrap());
-            }
-            let mut residuals = [0u32; BLOCK];
-            bitpack::unpack(&packed, u32::from(width), &mut residuals);
-            for (d, &r) in digits.iter_mut().zip(residuals.iter()) {
-                *d = min.wrapping_add(i64::from(r));
-            }
-        } else {
-            let nwords = LANES64 * width as usize;
-            let pb = payload.get(pos..pos + nwords * 8).ok_or(Error::Truncated)?;
-            pos += nwords * 8;
-            let mut packed = vec![0u64; nwords];
-            for (k, c) in pb.chunks_exact(8).enumerate() {
-                packed[k] = u64::from_le_bytes(c.try_into().unwrap());
-            }
-            let mut residuals = [0u64; BLOCK];
-            bitpack::unpack64(&packed, u32::from(width), &mut residuals);
-            for (d, &r) in digits.iter_mut().zip(residuals.iter()) {
-                *d = min.wrapping_add(r as i64);
-            }
-        }
+        residuals.fill(0);
+        unpack_residuals(payload, &mut pos, count, L::BITS, &mut residuals)?;
 
         let start = out.len();
-        for &d in digits.iter().take(count) {
-            out.push(decode_value::<L::Float>(d, e, f).to_bits());
+        if delta {
+            // Every residual is a zigzag step, the first one from `min`.
+            let mut d = min;
+            for &r in residuals.iter().take(count) {
+                let step = ((r >> 1) as i64) ^ -((r & 1) as i64);
+                d = d.wrapping_add(step);
+                out.push(decode_value::<L::Float>(d, e, f).to_bits());
+            }
+        } else {
+            for &r in residuals.iter().take(count) {
+                out.push(decode_value::<L::Float>(min.wrapping_add(r as i64), e, f).to_bits());
+            }
         }
         // Patch exceptions over the decoded digits.
         let exc_len = 2 + L::BYTES;
@@ -384,6 +374,23 @@ mod tests {
             })
             .collect();
         assert!(encode(&noise).is_none());
+    }
+
+    #[test]
+    fn smooth_digits_take_the_delta_stream() {
+        // A slow decimal ramp: consecutive digits differ by 1, so the delta
+        // stream packs at ~1-2 bits/value where offsets need ~10.
+        let v: Vec<u64> = (0..4096).map(|i| (1000.0 + i as f64 * 0.01).to_bits()).collect();
+        let size = roundtrip(&v).expect("ramp should ALP-encode");
+        assert!(size < v.len() / 2, "delta digits pack under 0.5 B/value: {size}");
+        let v32: Vec<u32> = (0..4096).map(|i| (100.0 + i as f32 * 0.5).to_bits()).collect();
+        let size = roundtrip(&v32).expect("f32 ramp should ALP-encode");
+        assert!(size < v32.len() * 3 / 4, "f32 delta digits pack small: {size}");
+        // A ramp with one wild exact digit: patched, not widened.
+        let mut w = v.clone();
+        w[2000] = 987_654_321.0f64.to_bits();
+        let size_w = roundtrip(&w).expect("ramp with outlier");
+        assert!(size_w < size + 64, "outlier digit is an exception: {size_w} vs {size}");
     }
 
     #[test]
