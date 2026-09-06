@@ -424,8 +424,9 @@ with the block's raw size. Same ratio-lab sweep, old → new policy:
 
 | level / selection | total bytes | notable |
 | --- | ---: | --- |
-| Balanced, Full | 19 094 951 → **18 692 919** (−2.1 %) | neon_pm10 140 373 → 97 189 (the +54 % flip undone), neon_dew_point −11.7 %, arade4 −2.8 %, syn-timestamps −8.3 % (pco wins where it is genuinely smaller); `decode_bias: Some(0)` gives the same bytes — the 10 % window never had to override size on this corpus |
-| Fast, Full | 22 455 871 → 22 603 107 (+0.7 %) | poi_lat +3.5 % (bit-packed FoR over ALP-RD, 2× faster decode) |
+| Balanced, Full | 19 094 951 → **18 692 919** (−2.1 %) | neon_pm10 140 373 → 97 189 (the +54 % flip undone), neon_dew_point −11.7 %, arade4 −2.8 %, syn-timestamps −8.3 % (pco wins where it is genuinely smaller) |
+| Balanced, `decode_bias: Some(0)` | 18 562 044 (−0.7 % vs the 10 % default) | the default gives up at most 8 % on a column (city_temperature, neon_pm10 −6 %) for 1.5–2× faster decode — bounded by the cap, as intended |
+| Fast, Full | 22 455 871 → 22 603 107 (+0.7 %) | poi_lat +3.5 % (bit-packed FoR over ALP-RD, 2× faster decode); `Some(0)` is 0.85 % smaller than the 25 % default |
 | Max/High | unchanged | λ = 0, bias 0 |
 | Fast / Balanced / Max, Sample | −3.6 % / −1.3 % / 0 | encode −20…−24 % |
 

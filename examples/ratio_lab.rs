@@ -5,7 +5,8 @@
 //! few synthetic integer columns and, when `LAB_BOOX` names PointDocument
 //! files, their `x`/`y` (f32) and `pressure`/`time` (i32) columns, at the
 //! levels in `LAB_LEVELS` (default `fast,balanced,max`), with `LAB_SELECTION=sample`
-//! for the sampled selector. Emits CSV:
+//! for the sampled selector and `LAB_BIAS=<percent>` to override the decode bias.
+//! Emits CSV:
 //! `column,dtype,level,n,raw_bytes,bytes,enc_ms,dec_ms,modes`. Every decode is
 //! checked bit-exact. Meant for A/B: run once on the baseline commit, once on
 //! the change, diff the CSVs.
@@ -202,12 +203,14 @@ fn main() {
         Ok("sample") => quoin::Selection::Sample,
         _ => quoin::Selection::Full,
     };
+    let decode_bias: Option<u32> = std::env::var("LAB_BIAS").ok().and_then(|s| s.parse().ok());
     println!("column,dtype,level,n,raw_bytes,bytes,enc_ms,dec_ms,modes");
     for (name, col) in &cols {
         for (lname, level) in &levels {
             let cfg = Config {
                 level: *level,
                 selection,
+                decode_bias,
                 ..Config::default()
             };
             quoin::reset_mode_win_counts();
