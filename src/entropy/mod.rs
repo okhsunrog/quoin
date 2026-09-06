@@ -268,10 +268,16 @@ mod cascade_tests {
         }
         let planes = code_residuals_planes(&data, 4, 2, false);
         assert_eq!(planes[0], TAG_PLANES, "rANS-only level should split planes");
-        assert!(decode_residuals(&planes, data.len() - 1).is_err(), "over max_len");
+        assert!(
+            decode_residuals(&planes, data.len() - 1).is_err(),
+            "over max_len"
+        );
         assert!(decode_residuals(&planes[..planes.len() - 5], data.len()).is_err());
         // Non-divisible / single plane fall back to the plain coding.
-        assert_ne!(code_residuals_planes(&data[..n * 4 - 1], 4, 2, false)[0], TAG_PLANES);
+        assert_ne!(
+            code_residuals_planes(&data[..n * 4 - 1], 4, 2, false)[0],
+            TAG_PLANES
+        );
         assert_ne!(code_residuals_planes(&data, 1, 2, false)[0], TAG_PLANES);
     }
 
@@ -281,13 +287,18 @@ mod cascade_tests {
         // capture the repeat (the bytes look random locally) but LZ can, so the
         // Max cascade (λ = 0) should win and kick in. A 1 KiB pseudo-random block
         // repeated many times.
-        let block: Vec<u8> = (0..1024u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 16) as u8).collect();
+        let block: Vec<u8> = (0..1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 16) as u8)
+            .collect();
         let mut data = Vec::new();
         for _ in 0..50 {
             data.extend_from_slice(&block);
         }
         let coded = code_residuals(&data, 0, true);
-        assert_eq!(coded[0], TAG_LZ, "long-range repeats should use the LZ cascade");
+        assert_eq!(
+            coded[0], TAG_LZ,
+            "long-range repeats should use the LZ cascade"
+        );
         assert!(coded.len() < data.len() / 4, "cascade should compress hard");
         assert_eq!(decode_residuals(&coded, data.len()).unwrap(), data);
 
@@ -296,7 +307,9 @@ mod cascade_tests {
         let mut s = 0x1234_5678u64;
         let noise: Vec<u8> = (0..4000)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (s >> 33) as u8
             })
             .collect();

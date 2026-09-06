@@ -272,7 +272,9 @@ fn levels_trade_ratio_for_speed_and_roundtrip() {
     // against): on a decimal column Fast's ALP/FLOAT_MULT win where Fastest's
     // bit-packers cannot follow. (The smooth sine above no longer separates
     // them: patched delta-bitpack wins at both.)
-    let cents: Vec<f64> = (0..100_000).map(|i| ((i * 7) % 100_000) as f64 / 100.0).collect();
+    let cents: Vec<f64> = (0..100_000)
+        .map(|i| ((i * 7) % 100_000) as f64 / 100.0)
+        .collect();
     let size_at = |level| {
         quoin::compress(
             &cents,

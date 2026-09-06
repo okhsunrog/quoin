@@ -25,7 +25,9 @@ fn load_f64(p: &Path, cap: usize) -> Vec<f64> {
 }
 
 fn lcg(s: &mut u64) -> u64 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *s = s
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *s
 }
 
@@ -72,8 +74,14 @@ impl Col {
     fn check(&self, bytes: &[u8]) {
         let dec = decompress_column(bytes).expect("decode").values;
         let ok = match (self, &dec) {
-            (Col::F64(v), Column::F64(g)) => v.iter().map(|x| x.to_bits()).eq(g.iter().map(|x| x.to_bits())),
-            (Col::F32(v), Column::F32(g)) => v.iter().map(|x| x.to_bits()).eq(g.iter().map(|x| x.to_bits())),
+            (Col::F64(v), Column::F64(g)) => v
+                .iter()
+                .map(|x| x.to_bits())
+                .eq(g.iter().map(|x| x.to_bits())),
+            (Col::F32(v), Column::F32(g)) => v
+                .iter()
+                .map(|x| x.to_bits())
+                .eq(g.iter().map(|x| x.to_bits())),
             (Col::I32(v), Column::I32(g)) => v == g,
             (Col::I64(v), Column::I64(g)) => v == g,
             _ => false,
@@ -92,13 +100,21 @@ fn boox_columns(path: &str) -> Vec<(String, Col)> {
         let off = i32::from_be_bytes(e[36..40].try_into().unwrap()) as usize;
         let len = i32::from_be_bytes(e[40..44].try_into().unwrap()) as usize;
         for r in b[off + 4..off + len].chunks_exact(16) {
-            x.push(f32::from_bits(u32::from_be_bytes(r[0..4].try_into().unwrap())));
-            y.push(f32::from_bits(u32::from_be_bytes(r[4..8].try_into().unwrap())));
+            x.push(f32::from_bits(u32::from_be_bytes(
+                r[0..4].try_into().unwrap(),
+            )));
+            y.push(f32::from_bits(u32::from_be_bytes(
+                r[4..8].try_into().unwrap(),
+            )));
             p.push(i32::from(i16::from_be_bytes([r[10], r[11]])));
             t.push(i32::from_be_bytes(r[12..16].try_into().unwrap()));
         }
     }
-    let stem = Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+    let stem = Path::new(path)
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     vec![
         (format!("boox-{stem}-x"), Col::F32(x)),
         (format!("boox-{stem}-y"), Col::F32(y)),
@@ -121,7 +137,10 @@ fn modes() -> String {
 
 fn main() {
     let dir = std::env::var("ALP_DIR").unwrap_or_else(|_| "datasets/alp".into());
-    let cap: usize = std::env::var("LAB_N").ok().and_then(|s| s.parse().ok()).unwrap_or(1 << 20);
+    let cap: usize = std::env::var("LAB_N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1 << 20);
     let levels = std::env::var("LAB_LEVELS").unwrap_or_else(|_| "fast,balanced,max".into());
     let levels: Vec<(String, Level)> = levels
         .split(',')
@@ -151,13 +170,26 @@ fn main() {
     // Synthetic integer columns (deterministic).
     let mut s = 0x1234_5678u64;
     let mut t = 1_700_000_000_000i64;
-    let ts: Vec<i64> = (0..cap.min(500_000)).map(|_| { t += 1000 + (lcg(&mut s) >> 52) as i64; t }).collect();
+    let ts: Vec<i64> = (0..cap.min(500_000))
+        .map(|_| {
+            t += 1000 + (lcg(&mut s) >> 52) as i64;
+            t
+        })
+        .collect();
     cols.push(("syn-timestamps".into(), Col::I64(ts)));
-    let ids: Vec<i32> = (0..cap.min(500_000)).map(|_| 5000 + (lcg(&mut s) >> 60) as i32).collect();
+    let ids: Vec<i32> = (0..cap.min(500_000))
+        .map(|_| 5000 + (lcg(&mut s) >> 60) as i32)
+        .collect();
     cols.push(("syn-lowcard".into(), Col::I32(ids)));
     // Bounded ids with rare outliers: the PFOR case.
     let pf: Vec<i32> = (0..cap.min(500_000))
-        .map(|i| if i % 997 == 0 { 1 << 24 } else { (lcg(&mut s) >> 54) as i32 })
+        .map(|i| {
+            if i % 997 == 0 {
+                1 << 24
+            } else {
+                (lcg(&mut s) >> 54) as i32
+            }
+        })
         .collect();
     cols.push(("syn-outliers".into(), Col::I32(pf)));
     if let Ok(list) = std::env::var("LAB_BOOX") {
@@ -173,7 +205,11 @@ fn main() {
     println!("column,dtype,level,n,raw_bytes,bytes,enc_ms,dec_ms,modes");
     for (name, col) in &cols {
         for (lname, level) in &levels {
-            let cfg = Config { level: *level, selection, ..Config::default() };
+            let cfg = Config {
+                level: *level,
+                selection,
+                ..Config::default()
+            };
             quoin::reset_mode_win_counts();
             let t0 = Instant::now();
             let enc = black_box(col.encode(cfg));
@@ -183,7 +219,13 @@ fn main() {
             let t0 = Instant::now();
             black_box(decompress_column(&enc).unwrap());
             let dec_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            println!("{name},{},{lname},{},{},{},{enc_ms:.3},{dec_ms:.3},{m}", col.dtype(), col.n(), col.raw(), enc.len());
+            println!(
+                "{name},{},{lname},{},{},{},{enc_ms:.3},{dec_ms:.3},{m}",
+                col.dtype(),
+                col.n(),
+                col.raw(),
+                enc.len()
+            );
         }
         eprintln!("{name} done");
     }

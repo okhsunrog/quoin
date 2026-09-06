@@ -108,7 +108,11 @@ fn sample_floats<L: Lane>(vals: &[L], count: usize) -> Vec<L::Float> {
     let runs = count / run_len;
     let mut out = Vec::with_capacity(count);
     for r in 0..runs {
-        let start = if runs == 1 { 0 } else { r * (n - run_len) / (runs - 1) };
+        let start = if runs == 1 {
+            0
+        } else {
+            r * (n - run_len) / (runs - 1)
+        };
         out.extend(vals[start..start + run_len].iter().map(|v| v.to_float()));
     }
     out
@@ -169,8 +173,8 @@ pub(crate) fn encode<L: Lane>(vals: &[L]) -> Option<Vec<u8>> {
         let sub = &vals[i..end];
         // Stage 2: the block's top candidates first; the full search only when
         // none of them fits this sub-block; verbatim when nothing does.
-        let ef = pick_ef(sub, cands.iter().copied())
-            .or_else(|| pick_ef(sub, all_pairs::<L::Float>()));
+        let ef =
+            pick_ef(sub, cands.iter().copied()).or_else(|| pick_ef(sub, all_pairs::<L::Float>()));
         match ef {
             Some((e, f)) => encode_subblock(sub, e, f, &mut out),
             None => {
@@ -351,7 +355,10 @@ mod tests {
         v[2000] = 3e38f32.to_bits();
         v[4999] = f32::INFINITY.to_bits();
         let size = roundtrip(&v).expect("f32 decimals should ALP-encode");
-        assert!(size < v.len() * 2, "cent prices pack under 2 B/value: {size}");
+        assert!(
+            size < v.len() * 2,
+            "cent prices pack under 2 B/value: {size}"
+        );
 
         // Stylus-like coordinates with one fractional decimal digit.
         let xy: Vec<u32> = (0..4096)
@@ -380,17 +387,30 @@ mod tests {
     fn smooth_digits_take_the_delta_stream() {
         // A slow decimal ramp: consecutive digits differ by 1, so the delta
         // stream packs at ~1-2 bits/value where offsets need ~10.
-        let v: Vec<u64> = (0..4096).map(|i| (1000.0 + i as f64 * 0.01).to_bits()).collect();
+        let v: Vec<u64> = (0..4096)
+            .map(|i| (1000.0 + i as f64 * 0.01).to_bits())
+            .collect();
         let size = roundtrip(&v).expect("ramp should ALP-encode");
-        assert!(size < v.len() / 2, "delta digits pack under 0.5 B/value: {size}");
-        let v32: Vec<u32> = (0..4096).map(|i| (100.0 + i as f32 * 0.5).to_bits()).collect();
+        assert!(
+            size < v.len() / 2,
+            "delta digits pack under 0.5 B/value: {size}"
+        );
+        let v32: Vec<u32> = (0..4096)
+            .map(|i| (100.0 + i as f32 * 0.5).to_bits())
+            .collect();
         let size = roundtrip(&v32).expect("f32 ramp should ALP-encode");
-        assert!(size < v32.len() * 3 / 4, "f32 delta digits pack small: {size}");
+        assert!(
+            size < v32.len() * 3 / 4,
+            "f32 delta digits pack small: {size}"
+        );
         // A ramp with one wild exact digit: patched, not widened.
         let mut w = v.clone();
         w[2000] = 987_654_321.0f64.to_bits();
         let size_w = roundtrip(&w).expect("ramp with outlier");
-        assert!(size_w < size + 64, "outlier digit is an exception: {size_w} vs {size}");
+        assert!(
+            size_w < size + 64,
+            "outlier digit is an exception: {size_w} vs {size}"
+        );
     }
 
     #[test]
@@ -401,7 +421,10 @@ mod tests {
             .map(|i| ((i.wrapping_mul(2_654_435_761) & ((1 << 40) - 1)) as f64 * 0.01).to_bits())
             .collect();
         let size = roundtrip(&v).expect("wide decimals should ALP-encode");
-        assert!(size < v.len() * 6, "wide digits pack under 6 B/value: {size}");
+        assert!(
+            size < v.len() * 6,
+            "wide digits pack under 6 B/value: {size}"
+        );
     }
 
     #[test]
@@ -418,7 +441,10 @@ mod tests {
         }
         let size = roundtrip(&v).expect("mixed block should still ALP-encode");
         // 5 decimal sub-blocks at ~2 B + 1 raw sub-block at 8 B.
-        assert!(size < 5 * 1024 * 3 + 1024 * 8 + 64, "mixed block size {size}");
+        assert!(
+            size < 5 * 1024 * 3 + 1024 * 8 + 64,
+            "mixed block size {size}"
+        );
         // Sub-block-level corruption is caught.
         let enc = encode(&v).unwrap();
         assert!(decode::<u64>(&enc[..enc.len() - 100], v.len()).is_err());

@@ -84,16 +84,32 @@ fn decode_weight<L: Lane>(mode: Mode, payload: &[u8]) -> u64 {
         Mode::Xorz | Mode::ForBitpack | Mode::DeltaBitpack | Mode::Rle => 1,
         Mode::Alp => 2,
         Mode::FloatMult => {
-            if float_mult::uses_entropy(payload) { 6 } else { 1 }
+            if float_mult::uses_entropy(payload) {
+                6
+            } else {
+                1
+            }
         }
         Mode::AlpRd => {
-            if alp_rd::uses_entropy::<L>(payload) { 6 } else { 2 }
+            if alp_rd::uses_entropy::<L>(payload) {
+                6
+            } else {
+                2
+            }
         }
         Mode::Dict => {
-            if dict::uses_entropy(payload) { 6 } else { 2 }
+            if dict::uses_entropy(payload) {
+                6
+            } else {
+                2
+            }
         }
         Mode::DictShared => {
-            if dict::shared_uses_entropy(payload) { 6 } else { 2 }
+            if dict::shared_uses_entropy(payload) {
+                6
+            } else {
+                2
+            }
         }
         Mode::Pred => 3,
         Mode::ByteTranspose => 6,
@@ -565,8 +581,13 @@ fn encode_block_full<L: Lane>(
     if entropy
         && block_compressible
         && (feats.exp_range <= TRANSPOSE_EXP_LIMIT || feats.looks_like_repeats)
-        && let Some(p) =
-            coded_planes_if_competitive(&transpose::encode(block), L::BYTES, lambda, allow_lz, best.score)
+        && let Some(p) = coded_planes_if_competitive(
+            &transpose::encode(block),
+            L::BYTES,
+            lambda,
+            allow_lz,
+            best.score,
+        )
     {
         best.consider(Mode::ByteTranspose, p);
     }
@@ -819,8 +840,12 @@ fn encode_block_sampled<L: Lane>(
         .iter()
         .filter(|&&m| mode_runs(m, family, level))
         .filter_map(|&m| {
-            encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None)
-                .map(|p| (p.len() + penalty::<L>(m, &p, level.lambda(), sample_bytes), m))
+            encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None).map(|p| {
+                (
+                    p.len() + penalty::<L>(m, &p, level.lambda(), sample_bytes),
+                    m,
+                )
+            })
         })
         .collect();
     ranked.sort_unstable_by_key(|&(score, m)| (score, m as u8));
@@ -829,7 +854,8 @@ fn encode_block_sampled<L: Lane>(
             best.consider(win, p);
         }
         if let Some(&(second_score, second)) = ranked.get(1)
-            && second_score.saturating_sub(win_score) * 100 <= win_score * SAMPLE_RUNNER_UP_MARGIN_PCT
+            && second_score.saturating_sub(win_score) * 100
+                <= win_score * SAMPLE_RUNNER_UP_MARGIN_PCT
             && let Some(p) = encode_mode(second, block, predictor_log2, dtype, level, None)
         {
             best.consider(second, p);

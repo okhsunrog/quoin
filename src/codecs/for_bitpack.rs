@@ -136,7 +136,11 @@ pub(crate) fn pack_residuals(residuals: &[u64; BLOCK], count: usize, out: &mut V
         // takes the real count back. Exceptions keep their low bits in the
         // stream and carry the high bits out of line.
         if width <= 32 {
-            let mask = if width == 32 { u32::MAX } else { (1u32 << width) - 1 };
+            let mask = if width == 32 {
+                u32::MAX
+            } else {
+                (1u32 << width) - 1
+            };
             let mut lows = [0u32; BLOCK];
             for (l, &r) in lows.iter_mut().zip(residuals.iter()) {
                 *l = r as u32 & mask;
@@ -147,7 +151,11 @@ pub(crate) fn pack_residuals(residuals: &[u64; BLOCK], count: usize, out: &mut V
                 out.extend_from_slice(&w.to_le_bytes());
             }
         } else {
-            let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let mask = if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
             let mut lows = [0u64; BLOCK];
             for (l, &r) in lows.iter_mut().zip(residuals.iter()) {
                 *l = r & mask;
@@ -201,7 +209,9 @@ pub(crate) fn unpack_residuals(
         residuals[..count].fill(0);
     } else if width <= 32 {
         let nwords = 32 * width as usize;
-        let pb = payload.get(*pos..*pos + nwords * 4).ok_or(Error::Truncated)?;
+        let pb = payload
+            .get(*pos..*pos + nwords * 4)
+            .ok_or(Error::Truncated)?;
         *pos += nwords * 4;
         let mut packed = vec![0u32; nwords];
         for (k, c) in pb.chunks_exact(4).enumerate() {
@@ -214,7 +224,9 @@ pub(crate) fn unpack_residuals(
         }
     } else {
         let nwords = LANES64 * width as usize;
-        let pb = payload.get(*pos..*pos + nwords * 8).ok_or(Error::Truncated)?;
+        let pb = payload
+            .get(*pos..*pos + nwords * 8)
+            .ok_or(Error::Truncated)?;
         *pos += nwords * 8;
         let mut packed = vec![0u64; nwords];
         for (k, c) in pb.chunks_exact(8).enumerate() {
@@ -366,7 +378,13 @@ mod tests {
         // 10-bit residuals with one 40-bit outlier per sub-block: patched
         // packing keeps the stream at ~10 bits/value + a few exception bytes.
         let vals: Vec<u64> = (0..4096u64)
-            .map(|i| if i % 1024 == 500 { 1 << 40 } else { i.wrapping_mul(7919) & 1023 })
+            .map(|i| {
+                if i % 1024 == 500 {
+                    1 << 40
+                } else {
+                    i.wrapping_mul(7919) & 1023
+                }
+            })
             .collect();
         let enc = encode(&vals, false);
         assert_eq!(decode::<u64>(&enc, vals.len(), false).unwrap(), vals);
@@ -382,11 +400,15 @@ mod tests {
             .collect();
         let enc = encode(&signed, true);
         assert_eq!(decode::<u64>(&enc, signed.len(), true).unwrap(), signed);
-        let v32: Vec<u32> = (0..3000u32).map(|i| if i % 700 == 3 { u32::MAX - i } else { i & 255 }).collect();
+        let v32: Vec<u32> = (0..3000u32)
+            .map(|i| if i % 700 == 3 { u32::MAX - i } else { i & 255 })
+            .collect();
         let enc = encode(&v32, false);
         assert_eq!(decode::<u32>(&enc, v32.len(), false).unwrap(), v32);
         assert!(enc.len() < 3 * (128 * 8 + 9 + 40) + 8);
-        let wide: Vec<u64> = (0..2000u64).map(|i| if i == 9 { u64::MAX } else { i << 30 }).collect();
+        let wide: Vec<u64> = (0..2000u64)
+            .map(|i| if i == 9 { u64::MAX } else { i << 30 })
+            .collect();
         let enc = encode(&wide, false);
         assert_eq!(decode::<u64>(&enc, wide.len(), false).unwrap(), wide);
         // Truncating the exception list is an error, not a panic.
