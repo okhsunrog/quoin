@@ -20,7 +20,7 @@ the way a general LZ compressor does.
 
 The payoff (single-threaded, see [Benchmarks](#benchmarks)): on real f64 columns
 quoin typically lands a **better compression ratio than `zstd -19` while
-compressing ~25× faster and decompressing 2–5× faster than zstd/zlib**. Its win is
+compressing ~19× faster and decompressing 1.7–3× faster than zstd/zlib**. Its win is
 ratio + decode speed; encode is a deliberate level tradeoff (the per-block codec
 search is CPU-heavy, so fast LZ codecs out-encode it at a far worse ratio).
 
@@ -183,25 +183,25 @@ Two honest takeaways across all three types:
   decompress panel (Fastest = fastest decode, Max = highest ratio, both still quick).
 - **Encode is a deliberate tradeoff.** The per-block codec *search* costs CPU, so
   quoin's high-ratio levels encode slower than fast `lz4`/`zstd -3` (which buy that
-  speed with a far worse ratio). quoin-Balanced still encodes **~25× faster than
-  `zstd -19` at a better ratio** (and even the exhaustive Max level ~2× faster),
+  speed with a far worse ratio). quoin-Balanced still encodes **~19× faster than
+  `zstd -19` at a better ratio** (and even the exhaustive Max level ~1.8× faster),
   and the level knob (Fastest→Max) lets you trade encode speed for ratio
   explicitly.
 
 **Integers** — quoin-Max reaches 8.4× (vs `zstd -19`'s 5.1×) and decodes faster than
-every baseline; on encode it's slower than `zstd -3` but still ~3× faster than
+every baseline; on encode it's slower than `zstd -3` but still ~2× faster than
 `zstd -19` at a much higher ratio:
 
 ![integer columns: ratio vs speed](docs/images/pareto_int.png)
 
 **Decimals** — quoin-Max takes the best ratio (17.4× vs `zstd -19`'s 14.3×);
-quoin-Balanced gets 13.4× at **36 MB/s** encode versus `zstd -19`'s 14.3× at
-**3 MB/s** (~12× faster), and the quoin levels own the decode panel:
+quoin-Balanced gets 17.3× at **33 MB/s** encode versus `zstd -19`'s 14.3× at
+**3 MB/s** (~11× faster), and the quoin levels own the decode panel:
 
 ![decimal columns: ratio vs speed](docs/images/pareto_decimal.png)
 
 **Floats** — the narrowest gap (mantissa bits are high-entropy): quoin-Balanced
-beats `zstd -19`'s ratio (2.53 vs 2.20) and decodes **~2.7× faster**; here the fast
+beats `zstd -19`'s ratio (2.72 vs 2.20) and decodes **~1.7× faster**; here the fast
 `lz4`/`zstd -3` do encode faster (at 1.35–1.89× ratio), so floats are where quoin's
 encode-search cost is most visible:
 
@@ -212,15 +212,15 @@ columns truncate the same data to show ratio is size-stable):
 
 | codec | ratio | compress MB/s | decompress MB/s | ratio @100 K | ratio @1 M |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| quoin (Fastest) | 1.17 | **619** | 1330 | 1.18 | 1.17 |
-| quoin (Fast) | 2.52 | 109 | 1830 | 2.47 | 2.51 |
-| **quoin (Balanced)** | **2.53** | 52 | 1854 | 2.47 | 2.51 |
-| quoin (High) | 2.73 | 8.1 | 1153 | 2.72 | 2.73 |
-| **quoin (Max)** | **2.73** | 4.6 | 1100 | 2.72 | 2.73 |
-| lz4 | 1.35 | 418 | **1933** | 1.32 | 1.34 |
-| zlib -6 | 1.95 | 41 | 375 | 1.91 | 1.94 |
-| zstd -3 | 1.89 | 212 | 770 | 1.86 | 1.88 |
-| zstd -19 | 2.20 | 2.2 | 691 | 2.17 | 2.19 |
+| quoin (Fastest) | 1.18 | **526** | 1263 | 1.18 | 1.18 |
+| quoin (Fast) | 2.65 | 87 | 1719 | 2.67 | 2.65 |
+| **quoin (Balanced)** | **2.72** | 44 | 1144 | 2.67 | 2.72 |
+| quoin (High) | 2.73 | 7.3 | 1105 | 2.72 | 2.73 |
+| **quoin (Max)** | **2.73** | 4.2 | 1041 | 2.72 | 2.73 |
+| lz4 | 1.35 | 396 | **1842** | 1.32 | 1.34 |
+| zlib -6 | 1.95 | 38 | 349 | 1.91 | 1.94 |
+| zstd -3 | 1.89 | 186 | 643 | 1.86 | 1.88 |
+| zstd -19 | 2.20 | 2.3 | 676 | 2.17 | 2.19 |
 
 ### Ratio across real columns
 
@@ -231,18 +231,18 @@ left→right by quoin's ratio below):
 
 | dataset | n | lz4 | zlib -6 | zstd -3 | zstd -19 | quoin-Bal | quoin-Max |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| air_sensor | 8 664 | 1.00 | 1.13 | 1.07 | 1.19 | 1.38 | **1.38** |
-| bird_migration | 17 964 | 2.13 | 3.13 | 3.04 | 3.37 | 5.47 | **6.03** |
-| basel_wind | 123 480 | 2.29 | 3.74 | 4.38 | 5.00 | 6.46 | **7.29** |
-| poi_lat | 424 205 | 1.01 | 1.14 | 1.31 | 1.75 | 1.82 | **2.00** |
-| city_temperature | 2 000 000 | 2.48 | 4.43 | 4.05 | 6.29 | 7.01 | **8.68** |
-| food_prices | 2 000 000 | 2.55 | 4.08 | 3.87 | **4.93** | 3.89 | 4.84 |
-| neon_dew_point | 2 000 000 | 1.93 | 3.15 | 3.10 | 3.72 | 6.03 | **6.62** |
-| bitcoin_tx | 231 031 | 1.23 | 1.73 | 1.66 | 1.77 | 2.34 | **2.35** |
+| air_sensor | 8 664 | 1.00 | 1.13 | 1.07 | 1.19 | 1.36 | **1.38** |
+| bird_migration | 17 964 | 2.13 | 3.13 | 3.04 | 3.37 | 5.47 | **6.03** |
+| basel_wind | 123 480 | 2.29 | 3.74 | 4.38 | 5.00 | 6.55 | **7.32** |
+| poi_lat | 424 205 | 1.01 | 1.14 | 1.31 | 1.75 | 1.85 | **2.02** |
+| city_temperature | 2 000 000 | 2.48 | 4.43 | 4.05 | 6.29 | 7.64 | **8.68** |
+| food_prices | 2 000 000 | 2.55 | 4.08 | 3.87 | **4.93** | 3.88 | 4.84 |
+| neon_dew_point | 2 000 000 | 1.93 | 3.15 | 3.10 | 3.72 | 6.24 | **6.62** |
+| bitcoin_tx | 231 031 | 1.23 | 1.73 | 1.66 | 1.77 | 2.34 | **2.35** |
 
 quoin-Max wins the ratio on 7 of 8 real columns (often by a wide margin —
 `city_temperature` 8.68× vs `zstd -19` 6.29×). `poi_lat` — repeated geo
-coordinates, formerly quoin's one loss here — flipped to a win (2.00× vs 1.75×)
+coordinates, formerly quoin's one loss here — flipped to a win (2.02× vs 1.75×)
 with the **column-wide shared value dictionary** (`DictShared`), which stores
 the distinct values once per stream instead of once per block. `zstd -19` keeps
 a small edge on one column (`food_prices`, 4.93 vs 4.84), all while quoin
@@ -262,14 +262,14 @@ the raw little-endian value bytes.
 
 | column | type | lz4 | zstd -3 | zstd -19 | quoin-Bal | quoin-Max |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| EventTime (timestamp) | i64 | 2.1 | 4.6 | 5.1 | 7.4 | **8.4** |
-| UserID (clustered) | i64 | 9.8 | 12.4 | 12.6 | 10.9 | **14.6** |
+| EventTime (timestamp) | i64 | 2.1 | 4.6 | 5.1 | 8.4 | **8.4** |
+| UserID (clustered) | i64 | 9.8 | 12.4 | 12.6 | 14.5 | **14.6** |
 | WatchID (random) | i64 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
-| CounterID (low-card) | i32 | 254 | 9 950 | 10 444 | 780 | **19 231** |
-| RegionID | i32 | 12.1 | 20.1 | **29.5** | 26.7 | 28.7 |
+| CounterID (low-card) | i32 | 254 | 9 950 | 10 444 | 27 778 | **30 075** |
+| RegionID | i32 | 12.1 | 20.1 | **29.5** | 27.0 | 28.9 |
 | IPNetworkID | i32 | 8.4 | 12.5 | 13.8 | 13.9 | **13.9** |
-| food_prices | dec128 | 5.6 | 8.9 | 10.8 | 12.0 | **12.9** |
-| city_temperature | dec128 | 5.4 | 12.0 | 14.3 | 13.4 | **17.4** |
+| food_prices | dec128 | 5.6 | 8.9 | 10.8 | 12.3 | **13.0** |
+| city_temperature | dec128 | 5.4 | 11.9 | 14.3 | 17.3 | **17.4** |
 | bitcoin_tx | dec128 | 3.4 | 4.5 | 5.7 | 6.4 | **6.5** |
 
 quoin-Max takes the best ratio on **every decimal column** and most integer
@@ -281,19 +281,20 @@ lz4:
 
 | column | type | lz4 | quoin-Fastest | quoin-Bal | quoin-Max |
 | --- | --- | ---: | ---: | ---: | ---: |
-| EventTime | i64 | 1384 | 2211 | 1460 | **2510** |
-| UserID | i64 | 1695 | 3078 | **5054** | 2791 |
-| RegionID | i32 | **2377** | 2157 | 1330 | 1246 |
-| city_temperature | dec128 | **5423** | 3545 | 1878 | 876 |
-| bitcoin_tx | dec128 | 4710 | **5572** | 4391 | 4129 |
+| EventTime | i64 | 1305 | 1735 | 1658 | **2577** |
+| UserID | i64 | 1555 | **3100** | 2720 | 2695 |
+| RegionID | i32 | 2241 | **2310** | 1952 | 1824 |
+| city_temperature | dec128 | 2434 | **3043** | 2680 | 712 |
+| bitcoin_tx | dec128 | 4485 | **4542** | 4333 | 4235 |
 
 On the delta-friendly integers (`EventTime`, `UserID`) quoin-Max decodes **faster
-than lz4** while compressing 4–8× better. On pure bit-packed `RegionID` and the
-smoothest decimals, lz4's memcpy-style decode is faster — but at lz4's far worse
-ratio (`RegionID` 12× vs quoin's 29×), and quoin-Fastest stays in the same decode
-class. Encode is the deliberate tradeoff: the codec search is CPU-heavy, so the fast
-LZ baselines encode quicker (at far lower ratio) while quoin still out-encodes
-`zstd -19`.
+than lz4** while compressing 4–8× better, and quoin-Fastest matches or beats lz4's
+memcpy-style decode on every row (patched bit-packing). The one slow cell is
+quoin-Max on the smoothest decimals (`city_temperature`, 712 MB/s): at `Max` the
+pure-size policy picks the sequential predictors there, which is exactly what
+`Balanced` (2 680 MB/s at 17.3×) avoids. Encode is the deliberate tradeoff: the
+codec search is CPU-heavy, so the fast LZ baselines encode quicker (at far lower
+ratio) while quoin still out-encodes `zstd -19`.
 
 ## Performance: SIMD, multiversion, rayon
 
