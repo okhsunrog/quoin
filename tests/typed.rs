@@ -953,3 +953,84 @@ fn f32_mode_coverage_is_native() {
         "predictors must engage on smooth f32: {size}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Decode bias: the level's codec pool and its size-for-speed allowance are
+// independent knobs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decode_bias_bounds_the_size_given_up_for_speed() {
+    let mut s = 0x5eedu64;
+    let columns: Vec<Vec<f64>> = vec![
+        (0..60_000)
+            .map(|i| 1000.0 + (i % 9000) as f64 * 0.01)
+            .collect(), // decimal ramp
+        (0..60_000)
+            .map(|i| (i as f64 * 0.001).sin() * 100.0)
+            .collect(), // smooth real
+        (0..60_000)
+            .map(|_| (lcg(&mut s) >> 60) as f64 * 0.125)
+            .collect(), // low cardinality
+        (0..60_000).map(|i| (i / 300) as f64).collect(), // runs
+    ];
+    for (k, col) in columns.iter().enumerate() {
+        for level in [Level::Fast, Level::Balanced] {
+            let size = |bias: Option<u32>| {
+                let cfg = Config {
+                    level,
+                    decode_bias: bias,
+                    ..Config::default()
+                };
+                let p = quoin::compress(col, cfg);
+                assert_eq!(
+                    quoin::decompress(&p).unwrap(),
+                    *col,
+                    "column {k} {level:?} {bias:?}"
+                );
+                p.len()
+            };
+            let pure = size(Some(0));
+            let default = size(None);
+            let cap = if level == Level::Balanced { 10 } else { 25 };
+            // The default allowance never gives up more than the cap over the
+            // pure-size choice of the same pool, and `Some(0)` is never larger.
+            assert!(
+                pure <= default,
+                "column {k} {level:?}: bias 0 ({pure}) ≤ default ({default})"
+            );
+            assert!(
+                default * 100 <= pure * (100 + cap) + 100,
+                "column {k} {level:?}: default ({default}) within {cap}% of bias 0 ({pure})"
+            );
+            // A huge allowance is monotone too: it can only pick cheaper decoders.
+            let loose = size(Some(1_000));
+            assert!(
+                loose >= pure,
+                "column {k} {level:?}: loose ({loose}) ≥ pure ({pure})"
+            );
+        }
+        // High and Max score by size alone: the bias knob changes nothing there.
+        for level in [Level::High, Level::Max] {
+            let a = quoin::compress(
+                col,
+                Config {
+                    level,
+                    ..Config::default()
+                },
+            );
+            let b = quoin::compress(
+                col,
+                Config {
+                    level,
+                    decode_bias: Some(50),
+                    ..Config::default()
+                },
+            );
+            assert_eq!(
+                a, b,
+                "column {k} {level:?}: pure-size levels ignore the bias"
+            );
+        }
+    }
+}

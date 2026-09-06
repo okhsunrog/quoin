@@ -135,17 +135,26 @@ tight incumbent is established early:
 
 ### Scoring
 
-Each candidate scores `payload_size + penalty(mode, λ, decoded_bytes)`, where
-`penalty = (λ · decode_weight · decoded_bytes) >> 8`. `λ` comes from the
-[level](#9-levels): `0` at `High`/`Max` → pure size; higher `λ` at the fast levels
-biases toward cheap-to-decode modes. `decode_weight` is a relative decode-cost
-class read off the **emitted payload** — FLOAT_MULT, DICT and ALP-RD are
-bit-packed or entropy-coded by size, and score accordingly. Note that the
-penalty scales with the block's *raw* bytes, so on highly compressible data it
-can outweigh large size differences (at `Balanced`, λ = 2, pco is charged
-≈5.5 % of the raw bytes): a cheaper-to-decode candidate may win while being
-tens of percent larger. That is the intended contract of the fast levels, and
-the knob to revisit if ratio at `Balanced` matters more than decode speed.
+Two independent knobs decide a block, and a level only sets their defaults:
+
+- the **codec pool** — which modes may compete (`Level`, see [§9](#9-levels));
+- the **decode bias** — the largest size increase, in percent over the smallest
+  candidate, accepted for a cheaper-to-decode codec (`Config::decode_bias`;
+  level defaults `Max`/`High` 0, `Balanced` 10, `Fast` 25, `Fastest` unbounded).
+
+`Best` keeps every candidate within `min_size · (1 + bias/100)` (a candidate
+that falls outside can never return, since the minimum only shrinks) and ranks
+those by `size · (1 + λ·w/1000)`, where `w` is the candidate's **measured
+decode cost in ns/value** (`examples/decode_costs.rs`, ALP corpus: RAW 0.2,
+bit-packing 1–2, ALP 1.4, pco 4, XORZ 6, bit-packed DICT/ALP-RD 7, rANS-coded
+≈ 32, range-coded ≈ 200) read off the emitted payload — FLOAT_MULT, DICT and
+ALP-RD are bit-packed or entropy-coded by size — and `λ` comes from the level
+(`Balanced` and `Fast` 10: pco must be 3 % smaller than ALP to win, bit-packed
+ALP-RD 7 % smaller than RAW; `Fastest` 20; `High`/`Max` 0 → pure size). The loss of ratio for decode speed is therefore
+bounded by the bias, and `Balanced` with `decode_bias: Some(0)` is the best
+ratio the recurrence-free pool can give. (The earlier formula charged
+`λ·w·raw_bytes`, which on highly compressible data outweighed size differences
+of tens of percent.)
 
 ### Selection strategies (`Config.selection`)
 
@@ -251,9 +260,10 @@ admits one more (slower-to-decode) tier:
 | `High` | + the sequential predictors + the range coder | slower |
 | `Max` (default) | + the LZ-over-residual cascade, `λ = 0` | slowest, best ratio |
 
-`λ` per level: `Fastest 16, Fast 4, Balanced 2, High 0, Max 0`. The entropy-coder
-choice and the predictor/pco/LZ gates are derived from the level. `Max` reproduces
-the pure-ratio (`λ = 0`, all codecs) policy.
+`λ` per level: `Fastest 20, Fast 10, Balanced 10, High 0, Max 0`; decode bias
+per level: `unbounded, 25 %, 10 %, 0, 0` (see [§5](#5-the-mode-competition-encode)).
+The entropy-coder choice and the predictor/pco/LZ gates are derived from the
+level. `Max` reproduces the pure-ratio (`λ = 0`, all codecs) policy.
 
 ---
 

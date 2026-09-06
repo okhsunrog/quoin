@@ -63,11 +63,7 @@ fn shared_dict_with_validity() {
         block_size: Some(8192),
         ..Config::default()
     };
-    let packed = quoin::compress_column(
-        quoin::ColumnRef::F64(&data),
-        Some(&bitmap),
-        cfg,
-    );
+    let packed = quoin::compress_column(quoin::ColumnRef::F64(&data), Some(&bitmap), cfg);
     let decoded = quoin::decompress_column(&packed).unwrap();
     let quoin::Column::F64(vals) = decoded.values else {
         panic!("wrong dtype");
@@ -136,5 +132,46 @@ fn corrupt_shared_streams_error_not_panic() {
         let mut bad = packed.clone();
         bad[i] ^= 0xA5;
         let _ = decompress(&bad);
+    }
+}
+
+#[test]
+fn shared_dict_winner_far_ahead_of_every_rival_still_decodes() {
+    // A column whose values recur across blocks with a cardinality far too
+    // high for any per-block codec: DICT_SHARED wins every block by a wide
+    // margin, so under a size cap no rival stays in the window. The gate must
+    // still see a positive gain (or the frames would reference a preamble that
+    // is never written). Exercises every level's bias.
+    let mut s = 0x5a5au64;
+    let table: Vec<f64> = (0..40_000)
+        .map(|_| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            f64::from_bits(0x4000_0000_0000_0000 | (s >> 12))
+        })
+        .collect();
+    let vals: Vec<f64> = (0..600_000)
+        .map(|i| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            table[((s >> 40) as usize + i) % table.len()]
+        })
+        .collect();
+    for level in [Level::Fast, Level::Balanced, Level::High, Level::Max] {
+        for bias in [None, Some(0), Some(10), Some(1_000)] {
+            let cfg = Config {
+                level,
+                decode_bias: bias,
+                ..Config::default()
+            };
+            let packed = compress(&vals, cfg);
+            assert_eq!(
+                decompress(&packed).unwrap(),
+                vals,
+                "{level:?} bias {bias:?}"
+            );
+        }
     }
 }

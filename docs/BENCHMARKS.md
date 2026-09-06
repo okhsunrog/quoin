@@ -410,6 +410,25 @@ packer with a delta stream −3.4 % / +0.3 % / 0; payload-aware decode weights
 increase is the cost-aware policy trading size for decode speed (see
 ARCHITECTURE §5), not a codec regression.
 
+### Pool / decode-bias split (selection policy)
+
+The level no longer fuses "which codecs compete" with "how much size to give
+up for decode speed": `Config::decode_bias` caps the size a cheaper decoder may
+cost (level defaults `Max`/`High` 0 %, `Balanced` 10 %, `Fast` 25 %,
+`Fastest` unbounded), candidates inside the cap are ranked by
+`size · (1 + λ·decode_ns/1000)` with **measured** per-codec decode costs
+(`examples/decode_costs.rs`: bit-packing ≈ 1 ns/value, ALP 1.4, pco 4, XORZ 6,
+bit-packed DICT/ALP-RD 7, rANS-coded ≈ 32, range-coded ≈ 200), instead of the
+old `λ·class·raw_bytes` penalty that charged pco like a range coder and scaled
+with the block's raw size. Same ratio-lab sweep, old → new policy:
+
+| level / selection | total bytes | notable |
+| --- | ---: | --- |
+| Balanced, Full | 19 094 951 → **18 692 919** (−2.1 %) | neon_pm10 140 373 → 97 189 (the +54 % flip undone), neon_dew_point −11.7 %, arade4 −2.8 %, syn-timestamps −8.3 % (pco wins where it is genuinely smaller); `decode_bias: Some(0)` gives the same bytes — the 10 % window never had to override size on this corpus |
+| Fast, Full | 22 455 871 → 22 603 107 (+0.7 %) | poi_lat +3.5 % (bit-packed FoR over ALP-RD, 2× faster decode) |
+| Max/High | unchanged | λ = 0, bias 0 |
+| Fast / Balanced / Max, Sample | −3.6 % / −1.3 % / 0 | encode −20…−24 % |
+
 ### Native 32-bit lane on real stylus data (BOOX Notes `PointDocument`)
 
 Measured with `examples/boox_points.rs` on three real ONYX BOOX Notes `#points`

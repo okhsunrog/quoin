@@ -163,6 +163,18 @@ fn decode_frames<L: Lane>(
         .collect()
 }
 
+/// Decode one block payload of `mode` (diagnostics / calibration; no shared
+/// dictionary).
+pub(crate) fn decode_block<L: Lane>(
+    mode: Mode,
+    payload: &[u8],
+    n: usize,
+    predictor_log2: u8,
+    dtype: DType,
+) -> Result<Vec<L>, Error> {
+    decode_frame(&Frame { mode, n, payload }, predictor_log2, dtype, None)
+}
+
 fn decode_frame<L: Lane>(
     f: &Frame<'_>,
     predictor_log2: u8,

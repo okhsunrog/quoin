@@ -73,13 +73,16 @@ pub enum Selection {
     Sample,
 }
 
-/// Speed/ratio trade-off. Each level sets which codecs compete and how strongly
-/// slow-to-decode codecs are penalized, dialing from maximum ratio to maximum
-/// speed. The cost-aware selection picks `argmin(size + λ·decode_cost)`; `λ` and
-/// the entropy-coder gate both come from the level.
+/// Speed/ratio trade-off. A level sets two independent things: the **codec
+/// pool** (which codecs may compete for a block) and the default **decode
+/// bias** — how much size the encoder may give up for a cheaper-to-decode
+/// codec (see [`Config::decode_bias`], which overrides it). Within that
+/// allowance candidates are ranked by `size · (1 + λ·w/1000)`, where `w` is the
+/// candidate's measured decode cost in ns/value (bit-packing ≈ 1, pco ≈ 4,
+/// rANS-coded ≈ 32, range-coded ≈ 200) and `λ` comes from the level.
 ///
-/// `Max` is the default and keeps the pure-ratio selection policy (λ = 0, all
-/// codecs). The penalty bias is most effective with [`Selection::Full`]; under
+/// `Max` is the default and keeps the pure-ratio selection policy (λ = 0, bias
+/// 0, all codecs). The bias is most effective with [`Selection::Full`]; under
 /// [`Selection::Sample`] a level mainly gates which codecs are estimated.
 /// The five levels form a ladder by **decode-cost class** — each step admits one
 /// more, slower-to-decode tier of codec:
@@ -120,10 +123,13 @@ pub enum Level {
 }
 
 impl Level {
-    /// Weight on decode cost in the selection score. `0` disables the penalty.
-    /// Also the single knob the entropy stage reads to derive its policy: the
-    /// range coder is allowed below [`RC_LAMBDA_CUTOFF`](crate::entropy::RC_LAMBDA_CUTOFF)
-    /// (so `Balanced` at `2` stays rANS-only) and the LZ cascade only at `0`.
+    /// Weight on decode cost in the selection score (per ns/value of decode
+    /// cost, in tenths of a percent of the candidate's size): a candidate that
+    /// decodes `w` ns/value slower than another must be `λ·w/1000` smaller to
+    /// win. `0` disables the penalty. Also the single knob the entropy stage
+    /// reads to derive its policy: the range coder is allowed below
+    /// [`RC_LAMBDA_CUTOFF`](crate::entropy::RC_LAMBDA_CUTOFF) (so `Balanced`
+    /// stays rANS-only) and the LZ cascade only at `0`.
     pub(crate) fn lambda(self) -> u64 {
         match self {
             // `High` and `Max` both score by pure size (λ = 0); they differ only
@@ -132,9 +138,23 @@ impl Level {
             // a decode-cost penalty here would let a cheap-to-decode mode beat a
             // much smaller one on hyper-compressible data (a confusing inversion).
             Level::Max | Level::High => 0,
-            Level::Balanced => 2,
-            Level::Fast => 4,
-            Level::Fastest => 16,
+            // pco (≈4 ns/value) must be 3 % smaller than ALP/bit-packing to
+            // win; bit-packed ALP-RD/DICT (≈7) 7 % smaller than RAW.
+            Level::Balanced | Level::Fast => 10,
+            // bit-packing must be 2 % smaller than RAW.
+            Level::Fastest => 20,
+        }
+    }
+
+    /// The level's default [`Config::decode_bias`]: the largest size increase,
+    /// in percent over the smallest candidate, the encoder may accept for a
+    /// cheaper-to-decode codec. `u32::MAX` means unbounded.
+    pub(crate) fn decode_bias(self) -> u32 {
+        match self {
+            Level::Max | Level::High => 0,
+            Level::Balanced => 10,
+            Level::Fast => 25,
+            Level::Fastest => u32::MAX,
         }
     }
 
@@ -223,6 +243,14 @@ pub struct Config {
     pub selection: Selection,
     /// Speed/ratio trade-off (see [`Level`]).
     pub level: Level,
+    /// Largest size increase, in **percent over the smallest candidate**, that
+    /// the encoder may accept for a cheaper-to-decode block codec. `None` takes
+    /// the level's default (`Max`/`High` 0, `Balanced` 10, `Fast` 25, `Fastest`
+    /// unbounded). `Some(0)` makes any level choose purely by size within its
+    /// codec pool — e.g. `Balanced` + `Some(0)` is the best ratio the
+    /// recurrence-free pool can give. Candidates within the allowance are
+    /// ranked by `size · (1 + λ·decode_ns/1000)` (see [`Level`]).
+    pub decode_bias: Option<u32>,
     /// Fixed block size in **values**, or `None` for the adaptive default
     /// (a base quantum grown for low-entropy regions). When `Some(n)`, every
     /// block holds exactly `n` values (the last may be shorter), clamped to
@@ -247,6 +275,7 @@ impl Default for Config {
             threads: None,
             selection: Selection::Full,
             level: Level::Max,
+            decode_bias: None,
             block_size: None,
         }
     }
@@ -255,6 +284,11 @@ impl Default for Config {
 impl Config {
     pub(crate) fn clamped_predictor_log2(&self) -> u8 {
         self.predictor_log2.clamp(10, 16)
+    }
+
+    /// The effective decode bias: the explicit setting or the level's default.
+    pub(crate) fn effective_decode_bias(&self) -> u32 {
+        self.decode_bias.unwrap_or(self.level.decode_bias())
     }
 
     /// The configured fixed block size clamped to the valid range for a lane of
@@ -582,6 +616,63 @@ pub fn reset_mode_win_counts() {
 #[doc(hidden)]
 pub mod bench_internals {
     use crate::Error;
+
+    /// Calibration: encode `vals` (one block) with every applicable mode at
+    /// `level` and time its decode. Returns `(mode name, payload bytes, decode
+    /// ns per value)`, median of `trials`.
+    pub fn mode_decode_costs(
+        vals: &[f64],
+        level: crate::Level,
+        trials: usize,
+    ) -> Vec<(&'static str, usize, f64)> {
+        use crate::mode::Mode;
+        let lane: &[u64] = crate::lane::reinterpret(vals);
+        let modes = [
+            Mode::Raw,
+            Mode::Xorz,
+            Mode::Pred,
+            Mode::PredRc,
+            Mode::Pred2,
+            Mode::Delta2,
+            Mode::DeltaDp,
+            Mode::OrderedDelta,
+            Mode::FloatMult,
+            Mode::Lz,
+            Mode::ByteTranspose,
+            Mode::ForBitpack,
+            Mode::Alp,
+            Mode::DeltaBitpack,
+            Mode::AlpRd,
+            Mode::Dict,
+            Mode::Rle,
+            Mode::Pco,
+        ];
+        let mut out = Vec::new();
+        for m in modes {
+            let Some(p) = crate::encoder::encode_mode(m, lane, 16, crate::DType::F64, level, None)
+            else {
+                continue;
+            };
+            let mut t: Vec<f64> = (0..trials)
+                .map(|_| {
+                    let s = std::time::Instant::now();
+                    let d = crate::decoder::decode_block::<u64>(
+                        m,
+                        &p,
+                        lane.len(),
+                        16,
+                        crate::DType::F64,
+                    )
+                    .unwrap();
+                    std::hint::black_box(d);
+                    s.elapsed().as_nanos() as f64 / lane.len() as f64
+                })
+                .collect();
+            t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            out.push((crate::mode_name(m.id()), p.len(), t[trials / 2]));
+        }
+        out
+    }
 
     /// Fold the runtime-selected (hardware where available) CRC32C hash over a block.
     pub fn hash_fold_best(vals: &[u64]) -> u32 {

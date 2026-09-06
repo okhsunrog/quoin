@@ -68,9 +68,11 @@ column onto a physical **lane** and lets type-appropriate codecs compete:
 Knowing the family (`Float` vs `Int`) gates which codecs even enter the
 competition: ALP / ALP-RD / float-multiplier only run on float lanes;
 frame-of-reference and the signed-delta cascade specialize on integers. For each
-block, every eligible codec is scored by `payload_size + λ·decode_cost` and the
-smallest wins (`λ = 0` at the top levels → pure ratio; higher λ at fast levels
-biases toward cheap-to-decode modes).
+block the smallest candidate sets the bar; within the level's **decode bias**
+(the size a level may give up for a faster decoder: `Max`/`High` 0 %,
+`Balanced` 10 %, `Fast` 25 %; `Config::decode_bias` overrides it) the
+cheapest-to-decode candidate wins, ranked by `size · (1 + λ·decode_ns/1000)`
+with measured per-codec decode costs.
 
 ### Codecs in the competition
 
@@ -97,7 +99,8 @@ biases toward cheap-to-decode modes).
 quoin lowers each typed column to its physical lane (`u32` or `u64`, by a zero-copy
 reinterpret), splits it into independent
 **blocks**, and runs a **per-block competition**: every applicable codec encodes the
-block and the smallest wins, scored by `size + λ·decode_cost`. The pool is
+block and the smallest wins, up to a per-level decode bias that lets a
+cheaper-to-decode codec take the block when it is within a few percent. The pool is
 type-specialized (frame-of-reference + bit-packing and delta cascades for integers;
 ALP / ALP-RD / FLOAT_MULT and a numeric latent backend for floats and decimals);
 three entropy coders (a 4-way **rANS**, an order-1 **range coder**, and an

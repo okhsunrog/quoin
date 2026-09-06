@@ -71,104 +71,203 @@ fn is_predictor_mode(mode: Mode) -> bool {
     )
 }
 
-/// Relative decode-cost class of a candidate (higher = slower). Used by the
-/// cost-aware selection so a faster level can prefer a slightly larger but
-/// cheaper-to-decode codec. Rough calibration vs `benches/kernels.rs`; the
-/// dominant axis is whether the candidate runs the sequential entropy coder —
-/// which for FLOAT_MULT, DICT, DICT_SHARED and ALP-RD depends on the emitted
-/// payload (their streams are bit-packed or entropy-coded by size), so the
-/// class is read off the payload's tags rather than assumed per mode.
+/// Decode cost of a candidate in **ns per value**, measured on the ALP corpus
+/// (`examples/decode_costs.rs`, 128 Ki-value blocks, median over columns):
+/// RAW 0.2, FoR/delta bit-pack 1–2, ALP 1.4, pco 4.2, XORZ 5.7, FCM 7.4,
+/// bit-packed DICT/ALP-RD 7, rANS-coded streams ≈ 32, range-coded ≈ 200.
+/// FLOAT_MULT, DICT, DICT_SHARED and ALP-RD are bit-packed or entropy-coded
+/// by size, so their cost is read off the emitted payload's tags; the entropy
+/// modes are charged the rANS cost (at `λ = 0`, where the range coder is
+/// allowed, the weight is irrelevant).
 fn decode_weight<L: Lane>(mode: Mode, payload: &[u8]) -> u64 {
+    const ENTROPY: u64 = 32;
     match mode {
         Mode::Raw | Mode::Const | Mode::Stride => 0,
-        Mode::Xorz | Mode::ForBitpack | Mode::DeltaBitpack | Mode::Rle => 1,
-        Mode::Alp => 2,
+        Mode::ForBitpack | Mode::Alp | Mode::Rle => 1,
+        Mode::DeltaBitpack => 2,
+        Mode::Pco => 4,
+        Mode::Xorz => 6,
+        Mode::Pred => 7,
         Mode::FloatMult => {
             if float_mult::uses_entropy(payload) {
-                6
+                ENTROPY
             } else {
-                1
+                2
             }
         }
         Mode::AlpRd => {
             if alp_rd::uses_entropy::<L>(payload) {
-                6
+                ENTROPY
             } else {
-                2
+                7
             }
         }
         Mode::Dict => {
             if dict::uses_entropy(payload) {
-                6
+                ENTROPY
             } else {
-                2
+                7
             }
         }
         Mode::DictShared => {
             if dict::shared_uses_entropy(payload) {
-                6
+                ENTROPY
             } else {
-                2
+                7
             }
         }
-        Mode::Pred => 3,
-        Mode::ByteTranspose => 6,
-        Mode::OrderedDelta | Mode::Delta2 | Mode::DeltaDp | Mode::Lz | Mode::Pco => 7,
-        Mode::PredRc | Mode::Pred2 => 10,
+        Mode::ByteTranspose
+        | Mode::OrderedDelta
+        | Mode::Delta2
+        | Mode::DeltaDp
+        | Mode::Lz
+        | Mode::PredRc
+        | Mode::Pred2 => ENTROPY,
     }
 }
 
-/// Decode-cost penalty (in bytes-equivalent) added to a candidate's size:
-/// `λ · weight · decoded_bytes`, scaled. `λ = 0` (level `Max`) → no penalty, so
-/// selection is pure size and reproduces the historical behavior.
-fn penalty<L: Lane>(mode: Mode, payload: &[u8], lambda: u64, decoded_bytes: usize) -> usize {
-    ((lambda.saturating_mul(decode_weight::<L>(mode, payload)))
-        .saturating_mul(decoded_bytes as u64)
-        >> 8) as usize
+/// Scale of `λ`: a candidate's score is `size · (SCORE_SCALE + λ·w) / SCORE_SCALE`.
+const SCORE_SCALE: u64 = 1000;
+
+/// Cost-aware score of a candidate: its size inflated by `λ·w` tenths of a
+/// percent, `w` its decode cost. `λ = 0` (`High`/`Max`) → pure size.
+fn score(size: usize, weight: u64, lambda: u64) -> u64 {
+    (size as u64).saturating_mul(SCORE_SCALE + lambda.saturating_mul(weight)) / SCORE_SCALE
 }
 
-/// Tracks the smallest-scoring candidate (`size + decode penalty`) for a block.
-/// Also remembers the runner-up *mode* so the LZ cascade (applied post-competition,
-/// see `encode_block_full`) can be tried on the top two, not just the winner.
-struct Best<L: Lane> {
+/// One candidate kept in the competition.
+struct Cand {
     mode: Mode,
     payload: Vec<u8>,
-    score: usize,
+    weight: u64,
+}
+
+/// The block competition: keeps every candidate whose size is within the
+/// decode-bias allowance of the smallest seen so far (`size ≤ min_size ·
+/// (1 + bias/100)`), and ranks those by [`score`]. Once a candidate falls
+/// outside the allowance it can never come back (`min_size` only shrinks), so
+/// dropping its payload is safe. Also exposes the runner-up mode so the LZ
+/// cascade (applied post-competition, see `encode_block_full`) can be tried on
+/// the top two, not just the winner.
+struct Best<L: Lane> {
+    cands: Vec<Cand>,
+    min_size: usize,
     lambda: u64,
-    decoded_bytes: usize,
-    runner_mode: Option<Mode>,
-    runner_score: usize,
+    /// Percent over `min_size`; `u32::MAX` = unbounded.
+    bias: u32,
+    /// Best-scoring candidate that was rejected or evicted by the window (mode
+    /// and score only — its payload is gone). Keeps the runner-up exact for the
+    /// shared-dictionary gain even when every rival is outside the window.
+    outside: Option<(Mode, u64)>,
     _lane: std::marker::PhantomData<L>,
 }
 
 impl<L: Lane> Best<L> {
-    fn new(mode: Mode, payload: Vec<u8>, lambda: u64, decoded_bytes: usize) -> Self {
-        let score = payload.len() + penalty::<L>(mode, &payload, lambda, decoded_bytes);
-        Best {
-            mode,
-            payload,
-            score,
+    fn new(mode: Mode, payload: Vec<u8>, lambda: u64, bias: u32) -> Self {
+        let mut b = Best {
+            cands: Vec::with_capacity(8),
+            min_size: usize::MAX,
             lambda,
-            decoded_bytes,
-            runner_mode: None,
-            runner_score: usize::MAX,
+            bias,
+            outside: None,
             _lane: std::marker::PhantomData,
+        };
+        b.consider(mode, payload);
+        b
+    }
+
+    fn note_outside(&mut self, mode: Mode, score: u64) {
+        if self.outside.is_none_or(|(_, s)| score < s) {
+            self.outside = Some((mode, score));
         }
     }
 
+    fn within(&self, size: usize) -> bool {
+        self.bias == u32::MAX
+            || (size as u128) * 100 <= (self.min_size as u128) * (100 + u128::from(self.bias))
+    }
+
     fn consider(&mut self, mode: Mode, payload: Vec<u8>) {
-        let score = payload.len() + penalty::<L>(mode, &payload, self.lambda, self.decoded_bytes);
-        if score < self.score {
-            // Demote the old winner to runner-up so the cascade still sees it.
-            self.runner_mode = Some(self.mode);
-            self.runner_score = self.score;
-            self.mode = mode;
-            self.payload = payload;
-            self.score = score;
-        } else if score < self.runner_score && mode != self.mode {
-            self.runner_mode = Some(mode);
-            self.runner_score = score;
+        let size = payload.len();
+        let weight = decode_weight::<L>(mode, &payload);
+        if size < self.min_size {
+            self.min_size = size;
+            let bias = self.bias;
+            let lambda = self.lambda;
+            let mut evicted: Option<(Mode, u64)> = None;
+            self.cands.retain(|c| {
+                let keep = bias == u32::MAX
+                    || (c.payload.len() as u128) * 100 <= (size as u128) * (100 + u128::from(bias));
+                if !keep {
+                    let sc = score(c.payload.len(), c.weight, lambda);
+                    if evicted.is_none_or(|(_, s)| sc < s) {
+                        evicted = Some((c.mode, sc));
+                    }
+                }
+                keep
+            });
+            if let Some((m, sc)) = evicted {
+                self.note_outside(m, sc);
+            }
         }
+        if self.within(size) {
+            self.cands.push(Cand {
+                mode,
+                payload,
+                weight,
+            });
+        } else {
+            self.note_outside(mode, score(size, weight, self.lambda));
+        }
+    }
+
+    fn score_of(&self, c: &Cand) -> u64 {
+        score(c.payload.len(), c.weight, self.lambda)
+    }
+
+    /// Index of the winner: lowest score, then smallest, then earliest.
+    fn winner(&self) -> usize {
+        let mut best = 0;
+        for (i, c) in self.cands.iter().enumerate().skip(1) {
+            let (s, b) = (self.score_of(c), self.score_of(&self.cands[best]));
+            if s < b || (s == b && c.payload.len() < self.cands[best].payload.len()) {
+                best = i;
+            }
+        }
+        best
+    }
+
+    fn mode(&self) -> Mode {
+        self.cands[self.winner()].mode
+    }
+
+    fn score(&self) -> u64 {
+        self.score_of(&self.cands[self.winner()])
+    }
+
+    /// The smallest payload seen so far (the size any candidate must approach).
+    fn min_size(&self) -> usize {
+        self.min_size
+    }
+
+    /// The best-scoring candidate of a *different* mode than the winner,
+    /// inside the window or not.
+    fn runner(&self) -> Option<(Mode, u64)> {
+        let w = self.winner();
+        let wm = self.cands[w].mode;
+        self.cands
+            .iter()
+            .enumerate()
+            .filter(|&(i, c)| i != w && c.mode != wm)
+            .map(|(_, c)| (c.mode, self.score_of(c)))
+            .chain(self.outside.filter(|&(m, _)| m != wm))
+            .min_by_key(|&(_, s)| s)
+    }
+
+    fn into_winner(mut self) -> (Mode, Vec<u8>) {
+        let w = self.winner();
+        let c = self.cands.swap_remove(w);
+        (c.mode, c.payload)
     }
 }
 
@@ -280,6 +379,7 @@ pub(crate) fn compress_lane<L: Lane>(
                         cfg.selection,
                         dtype,
                         level,
+                        cfg.effective_decode_bias(),
                         None,
                     );
                 }
@@ -329,11 +429,13 @@ fn build_frames<L: Lane>(
     shared: Option<&dict::SharedDict<L>>,
 ) -> Vec<FrameResult> {
     use rayon::prelude::*;
-    let (sel, level) = (cfg.selection, cfg.level);
+    let (sel, level, bias) = (cfg.selection, cfg.level, cfg.effective_decode_bias());
     let run = || {
         ranges
             .par_iter()
-            .map(|&(s, e)| encode_block(&vals[s..e], predictor_log2, sel, dtype, level, shared))
+            .map(|&(s, e)| {
+                encode_block(&vals[s..e], predictor_log2, sel, dtype, level, bias, shared)
+            })
             .collect::<Vec<_>>()
     };
     match cfg.threads {
@@ -363,6 +465,7 @@ fn build_frames<L: Lane>(
                 cfg.selection,
                 dtype,
                 cfg.level,
+                cfg.effective_decode_bias(),
                 shared,
             )
         })
@@ -375,11 +478,15 @@ fn encode_block<L: Lane>(
     sel: Selection,
     dtype: DType,
     level: Level,
+    bias: u32,
     shared: Option<&dict::SharedDict<L>>,
 ) -> FrameResult {
     match sel {
-        Selection::Full => encode_block_full(block, predictor_log2, dtype, level, shared),
-        Selection::Sample => (encode_block_sampled(block, predictor_log2, dtype, level), 0),
+        Selection::Full => encode_block_full(block, predictor_log2, dtype, level, bias, shared),
+        Selection::Sample => (
+            encode_block_sampled(block, predictor_log2, dtype, level, bias),
+            0,
+        ),
     }
 }
 
@@ -421,6 +528,7 @@ fn encode_block_full<L: Lane>(
     predictor_log2: u8,
     dtype: DType,
     level: Level,
+    bias: u32,
     shared: Option<&dict::SharedDict<L>>,
 ) -> FrameResult {
     let family = dtype.family();
@@ -434,8 +542,7 @@ fn encode_block_full<L: Lane>(
     // apply the cascade to that one winner below — turning ~8 LZ passes into 1.
     let cascade_lz = level.allows_lz_cascade();
     let allow_lz = false;
-    let decoded_bytes = block.len() * L::BYTES;
-    let raw_bytes = decoded_bytes;
+    let raw_bytes = block.len() * L::BYTES;
     let feats = probe_block_features(block);
 
     // Early-out: a genuinely incompressible integer block (full value *and* delta
@@ -448,7 +555,7 @@ fn encode_block_full<L: Lane>(
     }
 
     // RAW is the always-available baseline; every other mode must beat its score.
-    let mut best = Best::<L>::new(Mode::Raw, raw::encode(block), lambda, decoded_bytes);
+    let mut best = Best::<L>::new(Mode::Raw, raw::encode(block), lambda, bias);
 
     if let Some(p) = const_block::encode(block) {
         best.consider(Mode::Const, p);
@@ -510,7 +617,7 @@ fn encode_block_full<L: Lane>(
     if predictors {
         let fcm_res = pred::encode(block, predictor_log2);
         if looks_compressible(fcm_res.len(), raw_bytes)
-            && let Some(p) = coded_if_competitive(&fcm_res, lambda, allow_lz, best.score)
+            && let Some(p) = coded_if_competitive(&fcm_res, lambda, allow_lz, best.min_size())
         {
             best.consider(Mode::PredRc, p);
         }
@@ -519,7 +626,7 @@ fn encode_block_full<L: Lane>(
     if predictors {
         let dfcm_res = pred::dfcm_encode(block, predictor_log2);
         if looks_compressible(dfcm_res.len(), raw_bytes)
-            && let Some(p) = coded_if_competitive(&dfcm_res, lambda, allow_lz, best.score)
+            && let Some(p) = coded_if_competitive(&dfcm_res, lambda, allow_lz, best.min_size())
         {
             best.consider(Mode::Pred2, p);
         }
@@ -534,13 +641,13 @@ fn encode_block_full<L: Lane>(
         let order = linear::select_order(block);
         let lin2_res = linear::encode(block, order);
         if looks_compressible(lin2_res.len(), raw_bytes) {
-            if let Some(p) = coded_if_competitive(&lin2_res, lambda, allow_lz, best.score) {
+            if let Some(p) = coded_if_competitive(&lin2_res, lambda, allow_lz, best.min_size()) {
                 best.consider(Mode::Delta2, p);
             }
             // DELTA_DP: exact float residual of the same predictor; self-bails via
             // `None` when float subtraction isn't exactly invertible.
             if let Some(dp_res) = linear::dp_encode(block, order)
-                && let Some(p) = coded_if_competitive(&dp_res, lambda, allow_lz, best.score)
+                && let Some(p) = coded_if_competitive(&dp_res, lambda, allow_lz, best.min_size())
             {
                 best.consider(Mode::DeltaDp, p);
             }
@@ -549,13 +656,13 @@ fn encode_block_full<L: Lane>(
     if predictors {
         let idelta2_res = linear::idelta2_encode(block);
         if looks_compressible(idelta2_res.len(), raw_bytes)
-            && let Some(p) = coded_if_competitive(&idelta2_res, lambda, allow_lz, best.score)
+            && let Some(p) = coded_if_competitive(&idelta2_res, lambda, allow_lz, best.min_size())
         {
             best.consider(Mode::OrderedDelta, p);
         }
     }
 
-    let block_compressible = looks_compressible(best.payload.len(), raw_bytes);
+    let block_compressible = looks_compressible(best.min_size(), raw_bytes);
 
     // LZ: only worth its match finder + entropy pass on low-distinct or
     // repetitive data (dictionaries, quantized levels, cent-rounded prices).
@@ -586,7 +693,7 @@ fn encode_block_full<L: Lane>(
             L::BYTES,
             lambda,
             allow_lz,
-            best.score,
+            best.min_size(),
         )
     {
         best.consider(Mode::ByteTranspose, p);
@@ -628,7 +735,8 @@ fn encode_block_full<L: Lane>(
     // modes that actually cascade LZ are re-encoded (skip re-running pco/ALP/etc.,
     // which would just repeat heavy work for no cascade).
     if cascade_lz {
-        for m in [Some(best.mode), best.runner_mode].into_iter().flatten() {
+        let top2 = [Some(best.mode()), best.runner().map(|(m, _)| m)];
+        for m in top2.into_iter().flatten() {
             if mode_cascades_lz(m)
                 && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, shared)
             {
@@ -640,14 +748,22 @@ fn encode_block_full<L: Lane>(
     // The shared-dictionary gain: what this block saved over its best
     // alternative by using the column-wide table. The column-level gate sums
     // these against the preamble cost.
-    let gain = if best.mode == Mode::DictShared && best.runner_mode.is_some() {
-        best.runner_score.saturating_sub(best.score)
+    //
+    // `gain` must be positive whenever the winner is `DICT_SHARED`: the gate
+    // re-encodes exactly the blocks with `gain > 0` when it drops the preamble.
+    let gain = if best.mode() == Mode::DictShared {
+        best.runner()
+            .map_or(1, |(_, runner_score)| {
+                runner_score.saturating_sub(best.score()) as usize
+            })
+            .max(1)
     } else {
         0
     };
 
-    crate::diag::record_win(best.mode.id());
-    (frame_bytes(best.mode, block.len(), &best.payload), gain)
+    let (mode, payload) = best.into_winner();
+    crate::diag::record_win(mode.id());
+    (frame_bytes(mode, block.len(), &payload), gain)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +847,7 @@ fn mode_cascades_lz(mode: Mode) -> bool {
     )
 }
 
-fn encode_mode<L: Lane>(
+pub(crate) fn encode_mode<L: Lane>(
     mode: Mode,
     block: &[L],
     predictor_log2: u8,
@@ -803,11 +919,11 @@ fn encode_block_sampled<L: Lane>(
     predictor_log2: u8,
     dtype: DType,
     level: Level,
+    bias: u32,
 ) -> Vec<u8> {
     let family = dtype.family();
-    let decoded_bytes = block.len() * L::BYTES;
     let feats = probe_block_features(block);
-    let mut best = Best::<L>::new(Mode::Raw, raw::encode(block), level.lambda(), decoded_bytes);
+    let mut best = Best::<L>::new(Mode::Raw, raw::encode(block), level.lambda(), bias);
 
     let consider_full = |m: Mode, best: &mut Best<L>| {
         if let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, None) {
@@ -835,16 +951,13 @@ fn encode_block_sampled<L: Lane>(
     // too — then encode the winner in full, plus the runner-up when its
     // estimate is close, and let them challenge the structural best.
     let sample = build_sample(block);
-    let sample_bytes = sample.len() * L::BYTES;
-    let mut ranked: Vec<(usize, Mode)> = SAMPLE_MODES
+    let mut ranked: Vec<(u64, Mode)> = SAMPLE_MODES
         .iter()
         .filter(|&&m| mode_runs(m, family, level))
         .filter_map(|&m| {
             encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None).map(|p| {
-                (
-                    p.len() + penalty::<L>(m, &p, level.lambda(), sample_bytes),
-                    m,
-                )
+                let w = decode_weight::<L>(m, &p);
+                (score(p.len(), w, level.lambda()), m)
             })
         })
         .collect();
@@ -855,15 +968,16 @@ fn encode_block_sampled<L: Lane>(
         }
         if let Some(&(second_score, second)) = ranked.get(1)
             && second_score.saturating_sub(win_score) * 100
-                <= win_score * SAMPLE_RUNNER_UP_MARGIN_PCT
+                <= win_score * SAMPLE_RUNNER_UP_MARGIN_PCT as u64
             && let Some(p) = encode_mode(second, block, predictor_log2, dtype, level, None)
         {
             best.consider(second, p);
         }
     }
 
-    crate::diag::record_win(best.mode.id());
-    frame_bytes(best.mode, block.len(), &best.payload)
+    let (mode, payload) = best.into_winner();
+    crate::diag::record_win(mode.id());
+    frame_bytes(mode, block.len(), &payload)
 }
 
 /// Cheap gate for the expensive range-coded modes: only bother when the

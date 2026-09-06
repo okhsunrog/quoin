@@ -43,10 +43,10 @@ const W_RC: u64 = 30;
 const W_RANS: u64 = 3;
 
 /// `λ` at or above this keeps the entropy stage **rANS-only** (no bit-serial
-/// range coder), for fast decode. `Level::Balanced` sits here (`λ = 2`);
-/// `High`/`Max` (`λ ≤ 1`) admit the range coder. Deriving the policy from the
+/// range coder), for fast decode. `Level::Balanced` sits here (`λ = 10`);
+/// `High`/`Max` (`λ = 0`) admit the range coder. Deriving the policy from the
 /// single decode-cost knob avoids threading a separate flag everywhere.
-pub(crate) const RC_LAMBDA_CUTOFF: u64 = 2;
+pub(crate) const RC_LAMBDA_CUTOFF: u64 = 10;
 
 /// Entropy-code `bytes`, choosing the coder by the decode-cost policy in `λ`:
 /// above [`RC_LAMBDA_CUTOFF`] only rANS is considered (fast decode); below it the
@@ -266,7 +266,7 @@ mod cascade_tests {
             assert_eq!(decode_residuals(&planes, data.len()).unwrap(), data);
             assert_eq!(decode_residuals(&whole, data.len()).unwrap(), data);
         }
-        let planes = code_residuals_planes(&data, 4, 2, false);
+        let planes = code_residuals_planes(&data, 4, RC_LAMBDA_CUTOFF, false);
         assert_eq!(planes[0], TAG_PLANES, "rANS-only level should split planes");
         assert!(
             decode_residuals(&planes, data.len() - 1).is_err(),
