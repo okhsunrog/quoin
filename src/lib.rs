@@ -251,6 +251,11 @@ pub struct Config {
     /// recurrence-free pool can give. Candidates within the allowance are
     /// ranked by `size · (1 + λ·decode_ns/1000)` (see [`Level`]).
     pub decode_bias: Option<u32>,
+    /// pco (pcodec) search level, `0..=12`, for the `Pco` block mode. `None`
+    /// takes the level's default (`8`; `12` at `Max`). Decode cost does not
+    /// depend on it; higher levels trade encode time for ratio (measured on
+    /// stylus columns: `12` is ~3 % smaller than `8` at ~2× the pco encode time).
+    pub pco_level: Option<u8>,
     /// Fixed block size in **values**, or `None` for the adaptive default
     /// (a base quantum grown for low-entropy regions). When `Some(n)`, every
     /// block holds exactly `n` values (the last may be shorter), clamped to
@@ -276,6 +281,7 @@ impl Default for Config {
             selection: Selection::Full,
             level: Level::Max,
             decode_bias: None,
+            pco_level: None,
             block_size: None,
         }
     }
@@ -289,6 +295,13 @@ impl Config {
     /// The effective decode bias: the explicit setting or the level's default.
     pub(crate) fn effective_decode_bias(&self) -> u32 {
         self.decode_bias.unwrap_or(self.level.decode_bias())
+    }
+
+    /// The effective pco level: the explicit setting (clamped to `0..=12`) or
+    /// the level's default.
+    pub(crate) fn effective_pco_level(&self) -> usize {
+        self.pco_level
+            .map_or(self.level.pco_level(), |l| usize::from(l.min(12)))
     }
 
     /// The configured fixed block size clamped to the valid range for a lane of
@@ -649,8 +662,15 @@ pub mod bench_internals {
         ];
         let mut out = Vec::new();
         for m in modes {
-            let Some(p) = crate::encoder::encode_mode(m, lane, 16, crate::DType::F64, level, None)
-            else {
+            let Some(p) = crate::encoder::encode_mode(
+                m,
+                lane,
+                16,
+                crate::DType::F64,
+                level,
+                level.pco_level(),
+                None,
+            ) else {
                 continue;
             };
             let mut t: Vec<f64> = (0..trials)

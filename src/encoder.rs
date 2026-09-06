@@ -380,6 +380,7 @@ pub(crate) fn compress_lane<L: Lane>(
                         dtype,
                         level,
                         cfg.effective_decode_bias(),
+                        cfg.effective_pco_level(),
                         None,
                     );
                 }
@@ -434,7 +435,16 @@ fn build_frames<L: Lane>(
         ranges
             .par_iter()
             .map(|&(s, e)| {
-                encode_block(&vals[s..e], predictor_log2, sel, dtype, level, bias, shared)
+                encode_block(
+                    &vals[s..e],
+                    predictor_log2,
+                    sel,
+                    dtype,
+                    level,
+                    bias,
+                    cfg.effective_pco_level(),
+                    shared,
+                )
             })
             .collect::<Vec<_>>()
     };
@@ -466,12 +476,14 @@ fn build_frames<L: Lane>(
                 dtype,
                 cfg.level,
                 cfg.effective_decode_bias(),
+                cfg.effective_pco_level(),
                 shared,
             )
         })
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_block<L: Lane>(
     block: &[L],
     predictor_log2: u8,
@@ -479,12 +491,15 @@ fn encode_block<L: Lane>(
     dtype: DType,
     level: Level,
     bias: u32,
+    pco_level: usize,
     shared: Option<&dict::SharedDict<L>>,
 ) -> FrameResult {
     match sel {
-        Selection::Full => encode_block_full(block, predictor_log2, dtype, level, bias, shared),
+        Selection::Full => {
+            encode_block_full(block, predictor_log2, dtype, level, bias, pco_level, shared)
+        }
         Selection::Sample => (
-            encode_block_sampled(block, predictor_log2, dtype, level, bias),
+            encode_block_sampled(block, predictor_log2, dtype, level, bias, pco_level),
             0,
         ),
     }
@@ -523,12 +538,14 @@ fn coded_planes_if_competitive(
     Some(code_residuals_planes(res, planes, lambda, allow_lz))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_block_full<L: Lane>(
     block: &[L],
     predictor_log2: u8,
     dtype: DType,
     level: Level,
     bias: u32,
+    pco_level: usize,
     shared: Option<&dict::SharedDict<L>>,
 ) -> FrameResult {
     let family = dtype.family();
@@ -722,7 +739,7 @@ fn encode_block_full<L: Lane>(
     // (`None`) on empty blocks or internal errors, and competes on pure size
     // (λ = 0 at these levels), so it only wins when it is strictly smaller.
     if level.allows_pco()
-        && let Some(p) = L::pco_compress(block, dtype, level.pco_level())
+        && let Some(p) = L::pco_compress(block, dtype, pco_level)
     {
         best.consider(Mode::Pco, p);
     }
@@ -738,7 +755,8 @@ fn encode_block_full<L: Lane>(
         let top2 = [Some(best.mode()), best.runner().map(|(m, _)| m)];
         for m in top2.into_iter().flatten() {
             if mode_cascades_lz(m)
-                && let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, shared)
+                && let Some(p) =
+                    encode_mode(m, block, predictor_log2, dtype, level, pco_level, shared)
             {
                 best.consider(m, p);
             }
@@ -853,6 +871,7 @@ pub(crate) fn encode_mode<L: Lane>(
     predictor_log2: u8,
     dtype: DType,
     level: Level,
+    pco_level: usize,
     shared: Option<&dict::SharedDict<L>>,
 ) -> Option<Vec<u8>> {
     let lambda = level.lambda();
@@ -905,7 +924,7 @@ pub(crate) fn encode_mode<L: Lane>(
         }
         Mode::Rle => rle::encode(block),
         Mode::DeltaBitpack => Some(delta_bitpack::encode(block)),
-        Mode::Pco => L::pco_compress(block, dtype, level.pco_level()),
+        Mode::Pco => L::pco_compress(block, dtype, pco_level),
     }
 }
 
@@ -920,13 +939,14 @@ fn encode_block_sampled<L: Lane>(
     dtype: DType,
     level: Level,
     bias: u32,
+    pco_level: usize,
 ) -> Vec<u8> {
     let family = dtype.family();
     let feats = probe_block_features(block);
     let mut best = Best::<L>::new(Mode::Raw, raw::encode(block), level.lambda(), bias);
 
     let consider_full = |m: Mode, best: &mut Best<L>| {
-        if let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, None) {
+        if let Some(p) = encode_mode(m, block, predictor_log2, dtype, level, pco_level, None) {
             best.consider(m, p);
         }
     };
@@ -955,7 +975,7 @@ fn encode_block_sampled<L: Lane>(
         .iter()
         .filter(|&&m| mode_runs(m, family, level))
         .filter_map(|&m| {
-            encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, None).map(|p| {
+            encode_mode(m, &sample, SAMPLE_PLOG2, dtype, level, pco_level, None).map(|p| {
                 let w = decode_weight::<L>(m, &p);
                 (score(p.len(), w, level.lambda()), m)
             })
@@ -963,13 +983,14 @@ fn encode_block_sampled<L: Lane>(
         .collect();
     ranked.sort_unstable_by_key(|&(score, m)| (score, m as u8));
     if let Some(&(win_score, win)) = ranked.first() {
-        if let Some(p) = encode_mode(win, block, predictor_log2, dtype, level, None) {
+        if let Some(p) = encode_mode(win, block, predictor_log2, dtype, level, pco_level, None) {
             best.consider(win, p);
         }
         if let Some(&(second_score, second)) = ranked.get(1)
             && second_score.saturating_sub(win_score) * 100
                 <= win_score * SAMPLE_RUNNER_UP_MARGIN_PCT as u64
-            && let Some(p) = encode_mode(second, block, predictor_log2, dtype, level, None)
+            && let Some(p) =
+                encode_mode(second, block, predictor_log2, dtype, level, pco_level, None)
         {
             best.consider(second, p);
         }
