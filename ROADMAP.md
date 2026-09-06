@@ -109,8 +109,11 @@ BtrBlocks, FastLanes, ALP, pcodec) and the prioritized "steal list" live in
        previously quoin's one ratio loss on the corpus). A shared *LZ*
        dictionary was prototyped and shelved: sampled dicts recover only ~40%
        of the LZ window gap on `poi_lon` (1.21→1.27 of →1.38 whole-column).
-4. [ ] **PFOR patching** — move range-outliers to exceptions in FOR_BITPACK/ALP so
-       one large value doesn't widen a whole sub-block.
+4. [x] **PFOR patching** — `for_bitpack` chooses each sub-block's width by
+       total cost and stores wider residuals as `(position, high bits)`
+       exceptions; ALP's digit streams go through the same packer (plus an
+       optional per-sub-block delta transform). Measured Fast −3 % (BOOX
+       relative-time column −55 %), Max neutral.
 4. [x] **Typed column API** — generalize off `f64` to real typed columns + a type
        tag, so the integer codecs operate on real columns, not f64 bits.
        `DType`/`ColumnRef`/`Column` + `compress_column`, format v2 carries the

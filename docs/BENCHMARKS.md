@@ -387,6 +387,29 @@ because neither vectorizes. pco decode through quoin runs at **~2.8–3.4 GB/s**
 on `sensor_f64`, several times faster than vortex-compact's decode of the same
 column. See `vendor/quoin-pco/NOTICE` for the full list of fork changes.
 
+### Codec follow-ups after the native lane (ratio-lab sweep)
+
+Five changes measured one at a time with `examples/ratio_lab.rs` (ALP corpus
+capped at 1 Mi values per column, three synthetic integer columns, the BOOX
+`x`/`y`/`pressure`/`time` columns of two real files; Full selection; sizes are
+deterministic, times are single runs on a loaded desktop and only indicative).
+Cumulative over the v3 native-lane commit:
+
+| level | total bytes before → after | notable columns |
+| --- | ---: | --- |
+| Fast | 24 387 518 → **22 455 871** (−7.9 %) | BOOX time −55 %, coordinates −14…−19 %, neon_pm10 −37 %, bitcoin_tx −22 %, city_temperature −18 % |
+| Balanced | 19 198 645 → 19 094 951 (−0.5 %) | arade4 −5.3 %, city_temperature −5.4 %, ssd −13 %; neon_pm10 +54 % and neon_dew_point +12 % where the decode-cost penalty now prefers ALP over entropy-coded FLOAT_MULT (decode 3–6× faster) |
+| Max | 17 689 678 → 17 669 553 (−0.1 %) | poi_lat −1 % |
+
+Per change (Fast / Balanced / Max total bytes): two-stage ALP search + 64-bit
+digits + raw sub-block fallback −1.3 % / −0.3 % / 0; patched bit-packing
+−3.1 % / +0.2 % / 0; sampled selection scoring like Full (measured under
+`Selection::Sample`) −18.7 % / +2.8 % / 0; ALP digits through the patched
+packer with a delta stream −3.4 % / +0.3 % / 0; payload-aware decode weights
+−0.3 % / −0.7 % / 0; per-plane entropy models 0 / 0 / −0.1 %. Every Balanced
+increase is the cost-aware policy trading size for decode speed (see
+ARCHITECTURE §5), not a codec regression.
+
 ### Native 32-bit lane on real stylus data (BOOX Notes `PointDocument`)
 
 Measured with `examples/boox_points.rs` on three real ONYX BOOX Notes `#points`

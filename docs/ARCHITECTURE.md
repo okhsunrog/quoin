@@ -136,16 +136,25 @@ tight incumbent is established early:
 ### Scoring
 
 Each candidate scores `payload_size + penalty(mode, λ, decoded_bytes)`, where
-`penalty = (λ · decode_weight(mode) · decoded_bytes) >> 8`. `λ` comes from the
+`penalty = (λ · decode_weight · decoded_bytes) >> 8`. `λ` comes from the
 [level](#9-levels): `0` at `High`/`Max` → pure size; higher `λ` at the fast levels
-biases toward cheap-to-decode modes. `decode_weight` is a per-mode relative
-decode-cost class.
+biases toward cheap-to-decode modes. `decode_weight` is a relative decode-cost
+class read off the **emitted payload** — FLOAT_MULT, DICT and ALP-RD are
+bit-packed or entropy-coded by size, and score accordingly. Note that the
+penalty scales with the block's *raw* bytes, so on highly compressible data it
+can outweigh large size differences (at `Balanced`, λ = 2, pco is charged
+≈5.5 % of the raw bytes): a cheaper-to-decode candidate may win while being
+tens of percent larger. That is the intended contract of the fast levels, and
+the knob to revisit if ratio at `Balanced` matters more than decode speed.
 
 ### Selection strategies (`Config.selection`)
 
 - **`Full`** (default) — run the competition above.
-- **`Sample`** — rank modes by their size on a stratified sample, fully encode
-  only the winner (BtrBlocks/Vortex style). Much faster encode, slight ratio risk.
+- **`Sample`** — rank modes by their *score* (size + decode penalty) on a
+  1024-value stratified sample (one FastLanes sub-block, so bit-packed modes are
+  estimated without padding), fully encode the winner and — when its estimate
+  is within 10 % — the runner-up (BtrBlocks/Vortex style). Much faster encode,
+  slight ratio risk.
 
 ---
 
@@ -167,8 +176,8 @@ stream returns `Error`, never panics or over-allocates.
 | Group | Modes | Notes |
 | --- | --- | --- |
 | Structural | `Raw`, `Const`, `Stride`, `Xorz` | O(n), trivial; RAW is the baseline. |
-| Integer bit-pack | `ForBitpack`, `DeltaBitpack` | frame-of-reference / delta + FastLanes bit-pack. Random-access, fast decode. |
-| Float value | `Alp`, `AlpRd`, `FloatMult` | doubles that are really decimals → scaled integers (ALP) or split-dictionary (ALP-RD). |
+| Integer bit-pack | `ForBitpack`, `DeltaBitpack` | frame-of-reference / delta + FastLanes bit-pack, **patched**: the width is chosen by total cost and wider residuals become `(position, high bits)` exceptions. Random-access, fast decode. |
+| Float value | `Alp`, `AlpRd`, `FloatMult` | floats that are really decimals → scaled integers (ALP: two-stage `(e,f)` search, digits through the patched packer as offsets or deltas, raw fallback per sub-block) or split-dictionary (ALP-RD). |
 | Predictors | `Pred`, `PredRc`, `Pred2`, `Delta2`, `DeltaDp`, `OrderedDelta` | FCM/DFCM hash + XOR residual; polynomial-float; 2nd-order int. Sequential decode. |
 | Dictionary | `Dict`, `DictShared`, `Rle` | low-cardinality / run-heavy; `DictShared` codes into the **column-wide shared table** (see below). |
 | Generic | `ByteTranspose`, `Lz` | AoS→SoA byte planes; LZ77 over the block. |
@@ -205,7 +214,10 @@ residual bytes ─► entropy_pick (rANS vs range coder) ─► [+ LZ cascade at
 ```
 
 - **rANS** (`entropy/rans.rs`) — 4-way interleaved table-ANS. Fast decode. The
-  default entropy coder at `Balanced`.
+  default entropy coder at `Balanced`. A byte-transposed residual can carry
+  **one model per byte plane** (`TAG_PLANES`): eight planes have very
+  different distributions, and per-plane models measured 10–40 % smaller than
+  one order-0 model, close to the range coder.
 - **Range coder** (`entropy/rc.rs`) — bit-serial, adaptive order-1 byte model.
   Best ratio (~6% over rANS on correlated residuals), slow decode.
 - **LZ cascade** (`Max` only) — LZ77 over the *transformed residual*, then
